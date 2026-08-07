@@ -13,6 +13,7 @@
 //!       --num-ctx 2048,4096 --stream -n 3 \
 //!       -o sweep.json --output-csv sweep.csv
 
+mod api;
 
 use api::{BenchClient, IterationMetrics, Protocol};
 use clap::Parser;
