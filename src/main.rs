@@ -14,6 +14,7 @@
 //!       -o sweep.json --output-csv sweep.csv
 
 mod api;
+mod stats;
 
 use api::{BenchClient, IterationMetrics, Protocol};
 use clap::Parser;
