@@ -14,6 +14,9 @@
 //!       -o sweep.json --output-csv sweep.csv
 
 mod api;
+mod energy;
+mod gpu_sampler;
+mod host_sampler;
 mod stats;
 
 use api::{BenchClient, IterationMetrics, Protocol};
