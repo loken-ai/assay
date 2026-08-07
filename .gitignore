@@ -1,0 +1,36 @@
+/target
+target
+results/
+
+# What a run leaves in the checkout. A report describes one machine at one moment and is
+# regenerated, never committed: `-o` and `--output-csv` write wherever they are pointed, and
+# the default is right here.
+*.json
+*.csv
+*.log
+nohup.out
+core.*
+perf.data*
+
+# Media. This tool reads an image for the vision suite and writes none, so anything matching
+# here arrived by accident — a downloaded fixture, a paste, a stray capture. Ignoring it costs
+# nothing and is what keeps a repository from shipping content it never meant to redistribute.
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.bmp
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.mp4
+*.webm
+*.mid
+*.midi
+
+# Editor and tooling state.
+*~
+*.swp
+*.swo
