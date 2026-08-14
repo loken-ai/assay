@@ -161,6 +161,14 @@ struct Args {
     #[arg(long, value_delimiter = ',', default_values_t = vec!["short".to_string(), "medium".to_string(), "long".to_string()])]
     prompts: Vec<String>,
 
+    /// Give every iteration a prompt no engine has seen, by prefixing a counter.
+    ///
+    /// Both engines reuse a computed prefix, so replaying one prompt measures that cache
+    /// rather than the prefill: 6000 tokens came back in 9 ms, which is not a rate. Use
+    /// this whenever the prefill figure is the point.
+    #[arg(long)]
+    pub unique_prompt: bool,
+
     /// Custom prompt text (overrides --prompts; runs once per sweep cell)
     #[arg(short, long)]
     prompt: Option<String>,
@@ -293,10 +301,66 @@ struct CellResult<'a> {
     /// for the coherence eyeball check — distinguishes a real WIN from a
     /// fast-but-garbage WIN (Z-Image black-PNG, gemma4 "three three three").
     first_response_preview: Option<String>,
-    /// Coherence pass/fail flag. None if --require-substr was empty (no gate
-    /// requested), Some(true) if every non-empty preview contained at least
-    /// one required substring, Some(false) if any iteration lacked them all.
+    /// Coherence pass/fail flag. Always set when the cell produced text: a
+    /// degenerate answer fails on its own shape, and `--require-substr` adds an
+    /// expected-content gate on top when a caller supplies one.
     coherence_pass: Option<bool>,
+}
+
+/// Whether a response is a repeating pattern rather than an answer.
+///
+/// This is the check that needs no expected answer, which is the only reason it will
+/// actually be run: a gate that has to be told what the model should say is a gate every
+/// sweep leaves off, and one did - `coherence_pass` was null in every cell of a whole
+/// campaign while gemma4:31b emitted "--- --- --- ---" for 128 tokens and the table
+/// recorded it as a throughput result against ollama's prose.
+///
+/// A degenerate answer repeats a handful of units over and over, so the share of DISTINCT
+/// units collapses. Real prose and real code both sit far above the threshold - the
+/// separation is not delicate, which matters because a false accusation of garbage is
+/// worse than the gap it closes.
+fn looks_degenerate(text: &str) -> bool {
+    // Undecodable bytes. gemma4:31b answered "kingdom" then 50 replacement characters and
+    // the first version of this check passed it: they are all DISTINCT as units, so a
+    // distinct-ratio sees variety where there is only damage.
+    let chars = text.chars().count();
+    if chars >= 20 && text.chars().filter(|c| *c == '\u{FFFD}').count() * 10 > chars {
+        return true;
+    }
+    let units: Vec<&str> = text.split_whitespace().collect();
+    if units.len() < 12 {
+        return false; // too short to tell repetition from brevity
+    }
+    // A single unit repeated: "--- --- ---", "olde olde olde". Needs a longer run than the
+    // phrase check below to be conclusive, so it is gated separately rather than by an early
+    // return - the first version returned at 15 units and never reached the phrase check,
+    // which is how a 12-unit "time-olde olde olde ..." passed.
+    let distinct: std::collections::HashSet<&str> = units.iter().copied().collect();
+    if units.len() >= 15 && (distinct.len() as f64) / (units.len() as f64) < 0.15 {
+        return true;
+    }
+    // A PHRASE repeated, which the ratio above cannot see: "the end of a person, the end of
+    // a person, ..." has a perfectly ordinary share of distinct words. Four of the five
+    // gemma4 and lfm2 answers that were visibly looping passed the first check for exactly
+    // this reason. Count how much of the text one three-word window covers.
+    // Counting DISTINCT windows rather than the commonest one: a cycle of k words gives every
+    // window a share of 1/k, so a "commonest window" threshold has to be tuned per cycle
+    // length and misses the long ones - "the end of a person, ..." repeats five words and no
+    // single window covers more than 22%. Distinct windows over total lands near 1.0 for
+    // prose and collapses toward k/n for anything looping, whatever k is.
+    let windows: Vec<[&str; 3]> = units.windows(3).map(|w| [w[0], w[1], w[2]]).collect();
+    let distinct_windows: std::collections::HashSet<&[&str; 3]> = windows.iter().collect();
+    if (distinct_windows.len() as f64) / (windows.len() as f64) < 0.5 {
+        return true;
+    }
+    // A sane opening followed by a looping tail - "king who was able to see a time, that,
+    // that, that, ..." - keeps a high share of distinct windows because the head supplies
+    // them. What gives it away is one unit owning most of the answer.
+    let mut unit_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for u in &units {
+        *unit_counts.entry(*u).or_insert(0) += 1;
+    }
+    unit_counts.values().max().map(|m| (*m as f64) / (units.len() as f64) > 0.40).unwrap_or(false)
 }
 
 #[tokio::main]
@@ -564,6 +628,7 @@ async fn main() {
                         num_ctx,
                         prompt_name,
                         prompt_text,
+                        args.unique_prompt,
                         args.max_tokens,
                         args.iterations,
                         args.warmup,
@@ -701,6 +766,7 @@ fn compare_to_baseline(path: &str, cells: &[CellResult]) {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 async fn run_cell<'a>(
     client: &BenchClient,
     target: &'a ServerTarget,
@@ -708,6 +774,7 @@ async fn run_cell<'a>(
     num_ctx: usize,
     prompt_name: &str,
     prompt: &str,
+    unique_prompt: bool,
     max_tokens: usize,
     iterations: usize,
     warmup: usize,
@@ -783,6 +850,14 @@ async fn run_cell<'a>(
         // reliable for chat-tuned models that have model-load + warmup
         // overhead on the first forward call.
         let _ = i;
+        // A prefix no engine holds, so the prefill is computed rather than recalled. The
+        // counter goes in FRONT: a shared prefix with a different tail would still hit.
+        let iter_prompt: String = if unique_prompt {
+            format!("Request {} of a benchmark series.\n\n{}", i + 1, prompt)
+        } else {
+            prompt.to_string()
+        };
+        let prompt = iter_prompt.as_str();
 
         // Start GPU sampler before request, stop after
         let sampler = if gpu_sample { Some(GpuSampler::start(gpu_interval_ms)) } else { None };
@@ -876,27 +951,41 @@ async fn run_cell<'a>(
     // must contain at least one required substring (case-insensitive). A
     // single failure marks the whole cell incoherent so a fast-but-garbage
     // run can't be claimed as a WIN.
-    let coherence_pass = if require_substr.is_empty() {
-        None
-    } else {
-        let needles: Vec<String> = require_substr.iter().map(|s| s.to_lowercase()).collect();
-        let mut all_ok = !all_metrics.is_empty();
-        for m in &all_metrics {
-            let hay = m.response_preview.as_deref().unwrap_or("").to_lowercase();
+    let needles: Vec<String> = require_substr.iter().map(|s| s.to_lowercase()).collect();
+    let mut degenerate = None;
+    let mut missing_substr = false;
+    let mut judged = false;
+    for m in &all_metrics {
+        let preview = m.response_preview.as_deref().unwrap_or("");
+        if preview.trim().is_empty() {
+            continue;
+        }
+        judged = true;
+        if looks_degenerate(preview) {
+            degenerate = Some(preview.chars().take(46).collect::<String>());
+            break;
+        }
+        if !needles.is_empty() {
+            let hay = preview.to_lowercase();
             if !needles.iter().any(|n| hay.contains(n)) {
-                all_ok = false;
+                missing_substr = true;
                 break;
             }
         }
-        Some(all_ok)
+    }
+    let coherence_pass = if judged {
+        Some(degenerate.is_none() && !missing_substr)
+    } else {
+        None
     };
-    if let Some(pass) = coherence_pass {
-        if pass {
-            println!("    [coherence] PASS ({} substring(s) matched in all {} iter)",
-                require_substr.len(), all_metrics.len());
-        } else {
-            println!("    [coherence] FAIL — at least one iteration lacked every required substring");
-        }
+    if let Some(sample) = &degenerate {
+        println!("    [coherence] FAIL — the answer repeats itself: {sample:?}");
+        println!("    [coherence] a rate measured on this is not a rate. Treat the cell as empty.");
+    } else if missing_substr {
+        println!("    [coherence] FAIL — an iteration contained none of the required substrings");
+    } else if coherence_pass == Some(true) {
+        println!("    [coherence] PASS ({} iter{})", all_metrics.len(),
+            if needles.is_empty() { String::new() } else { format!(", {} substring gate", needles.len()) });
     }
 
     // Compute stats
@@ -1230,5 +1319,49 @@ fn normalize_url(input: &str) -> String {
         format!("http://localhost:{}", port)
     } else {
         format!("http://{}", trimmed)
+    }
+}
+
+#[cfg(test)]
+mod coherence_tests {
+    use super::looks_degenerate;
+
+    /// The check has to fire on what was actually observed, and stay silent on what a
+    /// working model writes. A gate that cannot do both is worse than none: it either
+    /// misses the garbage it was written for, or it accuses good cells and gets removed.
+    #[test]
+    fn it_recognises_a_repeating_answer_and_leaves_real_text_alone() {
+        // gemma4:31b, verbatim from the campaign's recorded preview.
+        assert!(looks_degenerate(&"--- ".repeat(40)));
+        // The four that slipped through the first version, verbatim from the sweep. Each
+        // has an ordinary share of distinct words and is plainly not an answer.
+        assert!(looks_degenerate("time-olde olde olde olde olde olde olde olde olde olde olde ol"));
+        assert!(looks_degenerate(
+            "person, the end of a person, the end of a person, the end of a person, the end of a"));
+        assert!(looks_degenerate(
+            "king who was able to see a time, that, that, that, that, that, that, that, that,"));
+        assert!(looks_degenerate(
+            "time, in a kingdom far far away, to a time, in a kingdom far far away, to a time, \
+             in a kingdom far far away, to a"));
+        assert!(looks_degenerate(&format!("kingdom{}", "\u{FFFD}".repeat(55))));
+        // Single-token loops - the other shape this takes.
+        assert!(looks_degenerate(&"three ".repeat(30)));
+        assert!(looks_degenerate(&"the the the ".repeat(12)));
+
+        assert!(!looks_degenerate(
+            "To understand how a modern CPU pipeline works, we must first divide the \
+             instruction into stages: fetch, decode, execute, memory access and write \
+             back, each handled by a different part of the chip while the next \
+             instruction is already entering the one before it."
+        ));
+        // Code repeats structure without repeating units, and must not be accused.
+        assert!(!looks_degenerate(
+            "fn main() { let mut total = 0; for i in 0..10 { total += i * 2; } \
+             println!(\"{}\", total); let names = vec![\"ana\", \"bo\", \"cy\"]; \
+             for n in names { println!(\"hello {}\", n); } }"
+        ));
+        // Brevity is not degeneracy - a short correct answer must pass.
+        assert!(!looks_degenerate("Paris."));
+        assert!(!looks_degenerate("The capital of France is Paris, on the Seine."));
     }
 }
