@@ -50,6 +50,18 @@ pub struct GenerateRequest {
     pub think: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<bool>,
+    /// Send the prompt UNWRAPPED, which is what this bench has always said it does.
+    ///
+    /// `/api/generate` applies the model's chat template by default - ollama's contract,
+    /// and LOKEN matches it - so without this those two answer a story opening presented
+    /// as a user message while vLLM, benched on `/v1/completions`, continues it. Three
+    /// engines, two different questions, on prompts written as continuations.
+    ///
+    /// It shows up as models that look like they stop early: qwen3-coder-next replied
+    /// "It seems your message was cut off. Could you please complete the sentence?" and
+    /// the cell recorded a token deficit against ollama's 128.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw: Option<bool>,
 }
 
 /// Ollama generate response
@@ -488,6 +500,8 @@ impl BenchClient {
             images: None,
             think: None,
             thinking: None,
+            // The load probe sends an empty prompt; there is nothing to wrap either way.
+            raw: None,
         };
         self.log_request("POST", &url, &req);
 
@@ -578,6 +592,11 @@ impl BenchClient {
             images: images.map(<[String]>::to_vec),
             think: Some(false),
             thinking: Some(false),
+            // Text prompts are continuations and must reach every engine unwrapped, the
+            // way vLLM's /v1/completions receives them. Vision prompts are instructions
+            // about an image and keep their template - stripping it there would compare
+            // a different task, not a fairer one.
+            raw: images.is_none().then_some(true),
         };
         self.log_request("POST", &url, &req);
 
@@ -677,6 +696,11 @@ impl BenchClient {
             images: images.map(<[String]>::to_vec),
             think: Some(false),
             thinking: Some(false),
+            // Text prompts are continuations and must reach every engine unwrapped, the
+            // way vLLM's /v1/completions receives them. Vision prompts are instructions
+            // about an image and keep their template - stripping it there would compare
+            // a different task, not a fairer one.
+            raw: images.is_none().then_some(true),
         };
         self.log_request("POST", &url, &req);
 
