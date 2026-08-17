@@ -181,6 +181,17 @@ struct Args {
     #[arg(short = 'n', long, default_value = "3")]
     iterations: usize,
 
+    /// Requests in flight at once. 1 (the default) keeps the sequential protocol exactly
+    /// as it was; above 1 the iterations of a cell are issued together and the cell also
+    /// reports an AGGREGATE rate - total tokens over the wall time of the flight.
+    ///
+    /// Per-request rates and aggregate rate answer different questions and neither
+    /// substitutes for the other. A single request cannot go faster for a second node
+    /// existing - it can only pay a hop. What a second node buys is served requests per
+    /// second, and that is invisible to a sequential sweep.
+    #[arg(long, default_value = "1")]
+    concurrency: usize,
+
     /// Number of warmup iterations (not counted in stats)
     #[arg(short, long, default_value = "1")]
     warmup: usize,
@@ -476,6 +487,9 @@ async fn main() {
     println!("  Prompts:    {}", prompt_specs.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", "));
     println!("  Max tokens: {}", args.max_tokens);
     println!("  Iterations: {} (+ {} warmup)", args.iterations, args.warmup);
+    if args.concurrency > 1 {
+        println!("  Concurrency: {} requests in flight", args.concurrency);
+    }
     println!("  Streaming:  {}", if args.stream { "yes" } else { "no" });
     println!("  GPU sample: {}", if args.no_gpu_sample { "off" } else { "on" });
     println!("  Energy:     {}", if args.no_energy { "off".to_string() } else { format!("on (CI={} gCO2/kWh)", args.carbon_intensity) });
@@ -631,6 +645,7 @@ async fn main() {
                         args.unique_prompt,
                         args.max_tokens,
                         args.iterations,
+                        args.concurrency,
                         args.warmup,
                         args.no_unload,
                         args.stream,
@@ -777,6 +792,7 @@ async fn run_cell<'a>(
     unique_prompt: bool,
     max_tokens: usize,
     iterations: usize,
+    concurrency: usize,
     warmup: usize,
     // Kept on the signature for now to match the CLI flag's shape; the
     // per-iteration unload it gated has been removed (see comment at the
@@ -840,7 +856,63 @@ async fn run_cell<'a>(
     let mut all_host_samples: Vec<Option<HostSample>> = Vec::new();
     let mut all_energy: Vec<Option<EnergyWindow>> = Vec::new();
 
-    for i in 0..iterations {
+    // Concurrent flights. Requests are issued together and the cell reports what the
+    // engine SERVED per second, which is the only figure a second node can move: one
+    // request never gets faster for a peer existing, it only pays a hop.
+    //
+    // Sampling is per flight rather than per request - overlapping windows would each
+    // attribute the whole machine's draw to one request and count the same joules N times.
+    if concurrency > 1 {
+        let flights = iterations.div_ceil(concurrency);
+        for f in 0..flights {
+            let n = concurrency.min(iterations - f * concurrency);
+            let prompts: Vec<String> = (0..n)
+                .map(|k| {
+                    let idx = f * concurrency + k;
+                    if unique_prompt {
+                        format!("Request {} of a benchmark series.\n\n{}", idx + 1, prompt)
+                    } else {
+                        prompt.to_string()
+                    }
+                })
+                .collect();
+            let t0 = std::time::Instant::now();
+            let results = futures::future::join_all(prompts.iter().map(|p| async move {
+                if stream {
+                    client.generate_stream(model, p, max_tokens, Some(num_ctx), images, session_id).await
+                } else {
+                    client.generate(model, p, max_tokens, Some(num_ctx), images, session_id).await
+                }
+            }))
+            .await;
+            let wall_s = t0.elapsed().as_secs_f64();
+            let mut served = 0usize;
+            let mut tokens = 0u64;
+            for r in results {
+                match r {
+                    Ok(m) => {
+                        served += 1;
+                        tokens += m.tokens_generated.unwrap_or(0);
+                        all_metrics.push(m);
+                        all_gpu_samples.push(Vec::new());
+                        all_host_samples.push(None);
+                        all_energy.push(None);
+                    }
+                    // A failure is reported and not counted: a flight that served fewer
+                    // requests in the same wall time would otherwise read as a slower engine
+                    // rather than as a broken one.
+                    Err(e) => println!("    [{}] flight request failed: {e}", target.label),
+                }
+            }
+            println!(
+                "    [{}] flight {}/{}: {}/{} served, {} tokens in {:.2}s -> {:.1} tok/s aggregate",
+                target.label, f + 1, flights, served, n, tokens, wall_s,
+                tokens as f64 / wall_s.max(1e-9)
+            );
+        }
+    }
+
+    for i in 0..if concurrency > 1 { 0 } else { iterations } {
         // Previously: unload+reload before each iteration past i=0. That
         // forces cold-cache state for every measured iter and causes
         // wide variance (one slow iter dominates the mean). We isolate
