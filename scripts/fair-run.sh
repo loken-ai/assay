@@ -59,7 +59,7 @@ HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 OLLAMA_BIN="${OLLAMA_BIN:-$(command -v ollama || echo ollama)}"
 OLLAMA_PORT="${OLLAMA_PORT:-11434}"
 
-LOKEN_BIN="${LOKEN_BIN:-$(command -v loken || echo ../loken/target/release/loken)}"
+LOKEN_BIN="${LOKEN_BIN:-$(command -v lokend || echo ../loken/target/release/lokend)}"
 LOKEN_PORT="${LOKEN_PORT:-11435}"
 
 # vLLM is started through a wrapper, because its arguments differ depending on whether the
