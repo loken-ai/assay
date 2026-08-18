@@ -262,7 +262,7 @@ struct Args {
     /// Process names to weigh for the host-footprint columns, comma-separated. The default
     /// covers the three engines this tool drives; vLLM runs as `python`, so a list that omits
     /// it reports a footprint for two engines and none for the third.
-    #[arg(long, value_delimiter = ',', default_values_t = ["loken".to_string(), "ollama".to_string(), "python".to_string(), "vllm".to_string()])]
+    #[arg(long, value_delimiter = ',', default_values_t = ["lokend".to_string(), "ollama".to_string(), "python".to_string(), "vllm".to_string()])]
     host_proc_names: Vec<String>,
 
     /// Sample idle (no-request) power for this many seconds at startup and record it in the
@@ -1123,7 +1123,7 @@ async fn run_cell<'a>(
         // host footprint column came back empty while the other two reported one — an
         // asymmetry that reads as a finding. The default names each engine's own process;
         // it is settable because a name that is generic enough to be someone else's — the
-        // LOKEN server used to be called plain "server" — silently sums a stranger's memory
+        // LOKEN daemon used to be called plain "server" — silently sums a stranger's memory
         // into the engine's footprint.
         let host_names: Vec<&str> = host_proc_names.iter().map(String::as_str).collect();
         let host_sampler = HostSampler::start(gpu_interval_ms.max(200), &host_names);
