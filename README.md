@@ -39,10 +39,11 @@ difference between engines hides:
   included — counts **the GPU alone** and its J/token is mechanically lower. The same counters
   exist on other platforms but live in MSRs that only a kernel driver can read, and a
   benchmark has no business installing one.
-- **the engines are made comparable before they are compared.** `--num-gpu 0` forces Ollama
-  onto the CPU for a CPU-to-CPU run; `--main-gpu` pins it to a chosen card on a box with
-  asymmetric GPUs, where its scheduler may otherwise pick the slower one. Without those, the
-  two sides are not running the same experiment.
+- **the engines are made comparable before they are compared.** Which cards each engine may
+  use is decided once, at launch, and applied to all of them — see `scripts/gpu-policy.sh`.
+  Restricting one engine to a card while the others keep the machine is the easiest way to
+  publish a fiction, and it is what a per-request pin quietly does. `--num-gpu 0` remains for
+  the CPU-to-CPU cell, where the other engines are launched CPU-only alongside it.
 - **vision suites** exist beside the text ones, because an image prompt exercises a different
   path and a text-only sweep says nothing about it.
 
