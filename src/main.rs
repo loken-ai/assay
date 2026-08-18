@@ -258,8 +258,10 @@ struct Args {
     #[arg(long, default_value_t = energy::DEFAULT_CARBON_INTENSITY)]
     carbon_intensity: f64,
 
-    /// Sample idle (no-request) power for this many seconds at startup to
-    /// capture an idle-energy baseline (active vs idle reporting later). 0 = off.
+    /// Sample idle (no-request) power for this many seconds at startup and record it in the
+    /// JSON output as `idle_energy_baseline`. It is NOT subtracted from the reported figures:
+    /// every J/token here includes the machine's idle draw, and this is the number to subtract
+    /// it with, in your own analysis. 0 = off.
     #[arg(long, default_value = "0")]
     idle_energy_secs: u64,
 
@@ -1351,23 +1353,42 @@ async fn run_cell<'a>(
     }
     // Energy metrics. Every one pairs a window with the token count of the SAME iteration,
     // through `per_token`, which refuses to pair at all when the two sides have drifted apart.
+    //
+    // The label carries WHICH domains the joules cover, because that differs by platform and
+    // by permissions: RAPL is readable from userspace on Linux and nowhere else, so a Windows
+    // run counts the GPU alone and its J/tok is mechanically lower than a Linux one. The two
+    // are not the same quantity, and since the comparison table matches rows by label, an
+    // unqualified "Energy J/tok" would let them be subtracted from each other in silence.
+    let domains = all_energy
+        .iter()
+        .flatten()
+        .next()
+        .map(|w| w.domains_counted.join("+"))
+        .unwrap_or_default();
+    let lbl = |base: &str| {
+        if domains.is_empty() {
+            base.to_string()
+        } else {
+            format!("{base} [{domains}]")
+        }
+    };
     let j_per_tok = per_token(&all_metrics, &all_energy, |w, t| w.j_per_tok(t));
-    if let Some(s) = Stats::compute("Energy J/tok", "J", &j_per_tok) {
+    if let Some(s) = Stats::compute(&lbl("Energy J/tok"), "J", &j_per_tok) {
         stats.push(s);
     }
     // Decode-phase J/tok (prefill excluded) — the cross-engine energy metric.
     let j_per_decode_tok = per_token(&all_metrics, &all_energy, |w, t| w.j_per_decode_tok(t));
-    if let Some(s) = Stats::compute("Energy decode J/tok", "J", &j_per_decode_tok) {
+    if let Some(s) = Stats::compute(&lbl("Energy decode J/tok"), "J", &j_per_decode_tok) {
         stats.push(s);
     }
     let wh_per_tok = per_token(&all_metrics, &all_energy, |w, t| w.wh_per_tok(t));
-    if let Some(s) = Stats::compute("Energy Wh/tok", "Wh", &wh_per_tok) {
+    if let Some(s) = Stats::compute(&lbl("Energy Wh/tok"), "Wh", &wh_per_tok) {
         stats.push(s);
     }
     let gco2_per_tok = per_token(&all_metrics, &all_energy, |w, t| {
         w.gco2_per_tok(t, carbon_intensity)
     });
-    if let Some(s) = Stats::compute("Carbon gCO2/tok", "g", &gco2_per_tok) {
+    if let Some(s) = Stats::compute(&lbl("Carbon gCO2/tok"), "g", &gco2_per_tok) {
         stats.push(s);
     }
 
