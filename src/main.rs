@@ -93,6 +93,13 @@ handling for malformed input. For each issue, show a corrected snippet.";
 // path, so a run is reproducible from the repository alone.
 const PROMPT_2_5K: &str = include_str!("../prompts/p2_5k.txt");
 
+// Context fillers. Uniform word salad rather than prose, on purpose: the point is to occupy a
+// known number of tokens without the model finding structure to latch onto, so the column
+// measures decode falloff as the KV cache grows and nothing else. Ordinary text of the same
+// length would let a model predict its way through and confound the two.
+const PROMPT_CTX_2000: &str = include_str!("../prompts/ctx_2000.txt");
+const PROMPT_CTX_8000: &str = include_str!("../prompts/ctx_8000.txt");
+
 /// Resolve a built-in prompt name to its content; returns None if unknown.
 fn builtin_prompt(name: &str) -> Option<&'static str> {
     match name {
@@ -100,6 +107,8 @@ fn builtin_prompt(name: &str) -> Option<&'static str> {
         "medium" => Some(PROMPT_MEDIUM),
         "long" => Some(PROMPT_LONG),
         "2.5k" | "2.5K" => Some(PROMPT_2_5K),
+        "ctx2000" => Some(PROMPT_CTX_2000),
+        "ctx8000" => Some(PROMPT_CTX_8000),
         "vision_short" => Some(PROMPT_VISION_SHORT),
         "vision_medium" => Some(PROMPT_VISION_MEDIUM),
         "vision_long" => Some(PROMPT_VISION_LONG),
@@ -209,14 +218,6 @@ struct Args {
     /// Use streaming mode (measures real TTFT + per-token ITL)
     #[arg(long)]
     stream: bool,
-
-    /// Accepted and ignored.
-    ///
-    /// Iterations do not unload between themselves: isolation is handled once at
-    /// the perimeter, and unloading per iteration forces a cold cache on every
-    /// one of them, which inflates the variance it was meant to control.
-    #[arg(long)]
-    no_unload: bool,
 
     /// Disable GPU sampling (use when NVML is unavailable)
     #[arg(long)]
@@ -408,7 +409,7 @@ async fn main() {
             match builtin_prompt(name) {
                 Some(p) => out.push((name.clone(), p)),
                 None => {
-                    eprintln!("Error: unknown prompt name '{}' (valid: short, medium, long, vision_short, vision_medium, vision_long)", name);
+                    eprintln!("Error: unknown prompt name '{}' (valid: short, medium, long, 2.5k, ctx2000, ctx8000, vision_short, vision_medium, vision_long)", name);
                     std::process::exit(1);
                 }
             }
@@ -730,7 +731,6 @@ async fn main() {
                         args.iterations,
                         args.concurrency,
                         args.warmup,
-                        args.no_unload,
                         args.stream,
                         !args.no_gpu_sample,
                         args.gpu_sample_interval_ms,
@@ -750,14 +750,13 @@ async fn main() {
     }
 
     // Final cleanup
-    for (j, target) in targets.iter().enumerate() {
+    for (j, _target) in targets.iter().enumerate() {
         for model in &args.models {
             if failed_models.contains(&(j, model.clone())) {
                 continue;
             }
             let _ = clients[j].unload_model(model).await;
         }
-        let _ = target;
     }
 
     // Per-cell tables
@@ -790,8 +789,12 @@ async fn main() {
     }
 
     // Per (model, num_ctx, prompt) comparison across targets
-    if targets.len() == 2 {
-        print_sweep_comparison(&all_cells, &targets);
+    // Pairwise, so a three-engine sweep is not silently left without any comparison at all —
+    // which is what a bare `== 2` did, on the very run this tool exists for.
+    for (i, a) in targets.iter().enumerate() {
+        for b in targets.iter().skip(i + 1) {
+            print_sweep_comparison(&all_cells, a, b);
+        }
     }
 
     // JSON / CSV
@@ -958,10 +961,6 @@ async fn run_cell<'a>(
     iterations: usize,
     concurrency: usize,
     warmup: usize,
-    // Kept on the signature for now to match the CLI flag's shape; the
-    // per-iteration unload it gated has been removed (see comment at the
-    // top of the iteration loop). Callers can keep passing it.
-    _no_unload: bool,
     stream: bool,
     gpu_sample: bool,
     gpu_interval_ms: u64,
@@ -1097,16 +1096,13 @@ async fn run_cell<'a>(
         }
     }
 
-    for i in 0..if concurrency > 1 { 0 } else { iterations } {
-        // Previously: unload+reload before each iteration past i=0. That
-        // forces cold-cache state for every measured iter and causes
-        // wide variance (one slow iter dominates the mean). We isolate
-        // models from each other at the perimeter level (cross-unload
-        // before/after each model), so per-iteration isolation isn't
-        // needed. Skipping the unload makes iter timings far more
-        // reliable for chat-tuned models that have model-load + warmup
-        // overhead on the first forward call.
-        let _ = i;
+    // Sequential path. Concurrency has its own loop above; expressing "skip this" as a
+    // zero-length range read as a bug every time anyone looked at it.
+    //
+    // Iterations deliberately do not unload between themselves. Models are isolated from one
+    // another at the perimeter, and unloading per iteration forces a cold cache on every
+    // measured run — which inflates exactly the variance the isolation exists to control.
+    for i in (0..iterations).take_while(|_| concurrency <= 1) {
         // A prefix no engine holds, so the prefill is computed rather than recalled. The
         // counter goes in FRONT: a shared prefix with a different tail would still hit.
         let iter_prompt: String = if unique_prompt {
@@ -1449,7 +1445,6 @@ fn format_itl_summary(itl: &[f64]) -> String {
     }
 }
 
-/// Print a per-GPU summary across all iterations of one cell.
 /// One-line host footprint summary (peak across iterations).
 fn print_host_summary(samples_per_iter: &[Option<HostSample>]) {
     let hs: Vec<&HostSample> = samples_per_iter.iter().flatten().collect();
@@ -1467,6 +1462,7 @@ fn print_host_summary(samples_per_iter: &[Option<HostSample>]) {
     );
 }
 
+/// Per-GPU summary across all iterations of one cell.
 fn print_gpu_summary(samples_per_iter: &[Vec<GpuSample>]) {
     // Aggregate per gpu_index across iterations.
     let mut by_idx: BTreeMap<u32, (String, Vec<&GpuSample>)> = BTreeMap::new();
@@ -1508,10 +1504,8 @@ fn print_gpu_summary(samples_per_iter: &[Vec<GpuSample>]) {
 }
 
 /// Side-by-side comparison across two targets, one block per (model, num_ctx, prompt).
-fn print_sweep_comparison(cells: &[CellResult], targets: &[ServerTarget]) {
-    if targets.len() != 2 {
-        return;
-    }
+fn print_sweep_comparison(cells: &[CellResult], target_a: &ServerTarget, target_b: &ServerTarget) {
+    let targets = [target_a, target_b];
     // Group cells by (model, num_ctx, prompt)
     let mut groups: BTreeMap<(String, usize, String), Vec<&CellResult>> = BTreeMap::new();
     for cell in cells {

@@ -13,13 +13,13 @@
 //! WHAT IT COVERS, BY PLATFORM. `domains_counted` records which of gpu / cpu_pkg / dram
 //! actually contributed, and it is not the same everywhere:
 //!
-//!   * GPU   — NVML's `total_energy_consumption` counter, or power draw integrated over the
-//!             window when the counter is absent. Works wherever NVML does, Windows included.
-//!   * CPU   — Intel RAPL package energy from the `energy_uj` counters under
-//!             /sys/class/powercap. **Linux only.** The same counters exist elsewhere, but in
-//!             MSRs that only ring 0 can read: no userspace path without a kernel driver, and
-//!             Intel's supported route, Power Gadget, was discontinued in 2023.
-//!   * DRAM  — the RAPL `dram` subdomain, where the platform exposes one. Same Linux limit.
+//! - **GPU** — NVML's `total_energy_consumption` counter, or power draw integrated over the
+//!   window when the counter is absent. Works wherever NVML does, Windows included.
+//! - **CPU** — Intel RAPL package energy from the `energy_uj` counters under
+//!   /sys/class/powercap. **Linux only.** The same counters exist elsewhere, but in MSRs that
+//!   only ring 0 can read: no userspace path without a kernel driver, and Intel's supported
+//!   route, Power Gadget, was discontinued in 2023.
+//! - **DRAM** — the RAPL `dram` subdomain, where the platform exposes one. Same Linux limit.
 //!
 //! So a Windows run counts the GPU alone and its J/token is mechanically lower than a Linux
 //! run of the same work. The two are different quantities; the reported labels say which, so
@@ -841,8 +841,7 @@ mod tests {
             max_range_uj: 1_000_000_000,
             kind: RaplKind::Dram,
         }];
-        let (_pkg, dram) =
-            rapl_delta_j(&dom, &vec![Some(1_000_000u128)], &vec![Some(3_000_000u128)]);
+        let (_pkg, dram) = rapl_delta_j(&dom, &[Some(1_000_000u128)], &[Some(3_000_000u128)]);
         // 2_000_000 µJ = 2.0 J
         assert!((dram - 2.0).abs() < 1e-9);
     }
