@@ -36,17 +36,45 @@
 #
 # Do not pass -o; use OUT=. CPU mode forces --num-gpu 0 on ollama, which is only fair because
 # the other engines are launched CPU-only alongside it.
+#
+# ── EVERY KNOB, IN ONE PLACE ─────────────────────────────────────────────────────────────
+#   the run      BENCH_MODE=cpu|gpu   OUT=<file>   MODELS_DIR=<ollama blob store>
+#                STREAM=0             to also cover the non-streamed path
+#                VLLM_SERVE="hf:<repo> --name <tag>"   to include vLLM in a GPU run
+#   the cards    GPUS=all|0|0,1       and per engine OLLAMA_GPUS / LOKEN_GPUS / VLLM_GPUS
+#                GPU_PIN=<n>          older spelling of GPUS=<n>
+#   binaries     ASSAY   OLLAMA_BIN   LOKEN_BIN   VLLM_HF_LAUNCHER   VLLM_TAG_LAUNCHER
+#   ports        OLLAMA_PORT   LOKEN_PORT   VLLM_PORT
+#   machine      PKG_TEMP_SENSOR=<sysfs temp file>   COOL_C=<°C>   LOGDIR=<dir>
+#
+# Nothing below needs editing to run this elsewhere; everything above takes an override.
 set -euo pipefail
-MODELS_DIR="${MODELS_DIR:-$HOME/.ollama/models}"   # where ollama keeps its blobs
+HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+
+# ── THE ENGINES ──────────────────────────────────────────────────────────────────────────
+# One paragraph each, the same three lines every time: where its binary is, where it listens,
+# and — for the one that needs it — how it is launched. Every value takes an override from
+# the environment, including the ports, so two runs can coexist and nobody has to edit this
+# file to run it on their own machine.
 OLLAMA_BIN="${OLLAMA_BIN:-$(command -v ollama || echo ollama)}"
-LOKEN_BIN="${LOKEN_BIN:-../loken/target/release/server}"   # one CUDA binary, both modes
-ASSAY="${ASSAY:-target/release/assay}"
-VLLM_PORT=8000
-BENCH_MODE="${BENCH_MODE:-cpu}"
-GPU_PIN="${GPU_PIN:-}"                       # older spelling of GPUS=<n>: expose only that card
-OUT="${OUT:-results/fairbench.json}"
-OLLAMA_PORT="${OLLAMA_PORT:-11434}"          # each engine's port, so two runs can coexist
+OLLAMA_PORT="${OLLAMA_PORT:-11434}"
+
+LOKEN_BIN="${LOKEN_BIN:-$(command -v loken || echo ../loken/target/release/server)}"
 LOKEN_PORT="${LOKEN_PORT:-11435}"
+
+# vLLM is started through a wrapper, because its arguments differ depending on whether the
+# weights come from an HF repo or a converted ollama tag. Which wrapper is chosen with
+# VLLM_SERVE, at the point of use.
+VLLM_HF_LAUNCHER="${VLLM_HF_LAUNCHER:-$HERE/vllm-serve-hf.sh}"
+VLLM_TAG_LAUNCHER="${VLLM_TAG_LAUNCHER:-$HERE/vllm-serve-ollama.sh}"
+VLLM_PORT="${VLLM_PORT:-8000}"
+
+# ── THE RUN ──────────────────────────────────────────────────────────────────────────────
+ASSAY="${ASSAY:-$(command -v assay || echo target/release/assay)}"   # the tool being driven
+MODELS_DIR="${MODELS_DIR:-$HOME/.ollama/models}"                     # ollama's blob store
+BENCH_MODE="${BENCH_MODE:-cpu}"                                      # cpu | gpu
+OUT="${OUT:-results/fairbench.json}"
+GPU_PIN="${GPU_PIN:-}"          # older spelling of GPUS=<n>: expose only that card
 [ "$BENCH_MODE" = cpu ] || [ "$BENCH_MODE" = gpu ] || { echo "BENCH_MODE must be cpu|gpu" >&2; exit 1; }
 
 # WHICH CARDS EACH ENGINE MAY USE — read from gpu-policy.sh, which is the only place that
@@ -59,9 +87,11 @@ LOKEN_PORT="${LOKEN_PORT:-11435}"
 # GPU_PIN is kept as the older spelling of "expose only this card"; fold it in before the
 # policy is read, so there is still exactly one place the decision is made.
 [ -n "$GPU_PIN" ] && GPUS="${GPUS:-$GPU_PIN}"
-. "$(dirname "$(readlink -f "$0")")/gpu-policy.sh"
-NUMGPU=(); LLMSERVE=()
-if [ "$BENCH_MODE" = cpu ]; then NUMGPU=(--num-gpu 0); LLMSERVE=(--cpu); fi
+. "$HERE/gpu-policy.sh"
+# How each engine is told to stay on the CPU, derived from BENCH_MODE below. NUMGPU goes to
+# the tool (an ollama option); LOKEN_EXTRA goes to the LOKEN server at launch.
+NUMGPU=(); LOKEN_EXTRA=()
+if [ "$BENCH_MODE" = cpu ]; then NUMGPU=(--num-gpu 0); LOKEN_EXTRA=(--cpu); fi
 
 # First model of the cell, parsed from --models: the placement decision below needs it,
 # and so does the pre-bench probe further down.
@@ -110,6 +140,10 @@ gpu_policy_banner
 # --stream is the protocol default: it measures a decode rate client-side and identically
 # for all three engines. STREAM=0 lifts it so the non-streaming path can be covered too -
 # most integrations call it, and it had never been measured.
+# ── THE PROTOCOL — what this script forces on every engine, and will not let a caller relax.
+# Cold (no warm-up), greedy through the tool's own default, one carbon intensity so the gCO2
+# column means the same thing across runs, and streaming unless STREAM=0 asks for the other
+# path. These are the reason a number from here can be compared with a number from there.
 COMMON=(--warmup 0 --carbon-intensity 50)
 [ "${STREAM:-1}" = 1 ] && COMMON+=(--stream)
 
@@ -211,6 +245,8 @@ engine_start() {
   return 0
 }
 
+# ── DERIVED — computed from the above, not settable. Grouped so the top of the file stays
+# the list of what a caller decides, and this stays the list of what follows from it.
 TMP=$(mktemp -d); PARTS=()
 TMPDIR_LOGS="$TMP/logs"; LOGDIR="${LOGDIR:-$TMPDIR_LOGS}"; mkdir -p "$LOGDIR"
 
@@ -220,17 +256,17 @@ E_BIN[ollama]="$OLLAMA_BIN"; E_ARGS[ollama]="serve"
 E_ENV[ollama]="OLLAMA_VULKAN=0 OLLAMA_MODELS=$MODELS_DIR/"
 E_PROBE[ollama]="http://127.0.0.1:$OLLAMA_PORT/api/version"; E_WAIT[ollama]=60
 
-E_BIN[loken]="$LOKEN_ABS"; E_ARGS[loken]="serve --models-dir $MODELS_DIR --keep-alive 30m ${LLMSERVE[*]:-}"
+E_BIN[loken]="$LOKEN_ABS"; E_ARGS[loken]="serve --models-dir $MODELS_DIR --keep-alive 30m ${LOKEN_EXTRA[*]:-}"
 # Started from the directory that HOLDS config.toml. There is no --config flag: the server
 # looks for ./config.toml first, so the working directory silently decides which configuration
 # is measured — and a different memory fraction is a different per-card budget, hence a
 # different placement for any model near the boundary.
-E_CWD[loken]="$(cd "$(dirname "$0")/.." && pwd)"
+E_CWD[loken]="$(cd "$HERE/.." && pwd)"
 E_PROBE[loken]="http://127.0.0.1:$LOKEN_PORT/api/version"; E_WAIT[loken]=60
 
 # vLLM is launched through a wrapper because its own flags differ per source (an HF repo or a
 # converted ollama tag). The wrapper is data here like the others, not a special case below.
-E_BIN[vllm]="$(dirname "$(readlink -f "$0")")/vllm-serve-hf.sh"
+E_BIN[vllm]="$VLLM_HF_LAUNCHER"
 E_PROBE[vllm]="http://127.0.0.1:$VLLM_PORT/v1/models"; E_WANT[vllm]='"id"'; E_WAIT[vllm]=600
 echo "▶ BENCH_MODE=$BENCH_MODE  GPU_PIN='${GPU_PIN:-none}'  → $OUT"
 
@@ -294,7 +330,7 @@ if [ -f "$TMP/ollama.json" ]; then PARTS+=("$TMP/ollama.json"); fi
 
 # ── 2. LOKEN, isolated ───────────────────────────────────────────────────────
 kill_all
-echo "▶ LOKEN${LLMSERVE:+ ${LLMSERVE[*]}} …"
+echo "▶ LOKEN${LOKEN_EXTRA:+ ${LOKEN_EXTRA[*]}} …"
 engine_start loken || true
 cool_wait
 "$ASSAY" --loken http://127.0.0.1:$LOKEN_PORT "${NUMGPU[@]}" "${COMMON[@]}" "$@" -o "$TMP/loken.json" || true
@@ -308,10 +344,10 @@ if [ "$BENCH_MODE" = gpu ] && [ -n "${VLLM_SERVE:-}" ]; then
   # vLLM parses CUDA_VISIBLE_DEVICES as integers and a UUID breaks it. The card SET is the
   # policy's; this only says which of those it starts on.
   if [[ "$VLLM_SERVE" == hf:* ]]; then
-    E_BIN[vllm]="$(dirname "$(readlink -f "$0")")/vllm-serve-hf.sh"
+    E_BIN[vllm]="$VLLM_HF_LAUNCHER"
     E_ARGS[vllm]="${VLLM_SERVE#hf:} --gpu ${GPU_PIN:-0} --port $VLLM_PORT"
   else
-    E_BIN[vllm]="$(dirname "$(readlink -f "$0")")/vllm-serve-ollama.sh"
+    E_BIN[vllm]="$VLLM_TAG_LAUNCHER"
     E_ARGS[vllm]="$VLLM_SERVE --gpu ${GPU_PIN:-0} --port $VLLM_PORT"
   fi
   echo "  waiting for vLLM to finish loading weights (minutes)…"
