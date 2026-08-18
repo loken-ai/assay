@@ -1,7 +1,8 @@
 //! Minimal API client for benchmarking. Speaks two protocols:
 //!   * `Protocol::Ollama` — Ollama-native `/api/generate` NDJSON (Ollama, LOKEN).
 //!   * `Protocol::OpenAI` — OpenAI-compatible `/v1/completions` SSE (vLLM).
-//! Only includes the types and methods needed for generate + load/unload.
+//!
+//! Only the types and methods needed for generate, load and unload.
 
 use futures::StreamExt;
 use reqwest::Client as HttpClient;
@@ -175,6 +176,12 @@ struct OpenAiCompletionChunk {
     usage: Option<OpenAiUsage>,
 }
 
+/// What one streamed request yields to the caller: time to the first chunk, the server's
+/// final NDJSON body if it sent one, how many chunks carried text, the per-token arrival
+/// times, the accumulated text, and the wall clock. Named because a six-element tuple in the
+/// most-scrutinised function in the file is not something a reader should have to decode.
+type StreamOutcome = (Option<f64>, Option<String>, u64, Vec<f64>, String, f64);
+
 /// Metrics extracted from a single benchmark iteration
 #[derive(Debug, Clone, Default)]
 pub struct IterationMetrics {
@@ -304,7 +311,7 @@ impl BenchClient {
                 .unwrap_or_default();
             // Exact match preferred; otherwise accept any served model so the
             // bench alias need not equal the HF repo id.
-            return ids.iter().any(|id| *id == model) || !ids.is_empty();
+            return ids.contains(&model) || !ids.is_empty();
         }
         let url = format!("{}/api/show", self.base_url);
         let body = serde_json::json!({ "model": model });
@@ -753,7 +760,7 @@ impl BenchClient {
         let body_bytes = serde_json::to_vec(&req).map_err(|e| format!("serialize: {}", e))?;
         let max_tok = max_tokens;
         let (first_chunk_time, last_done_line, token_count, token_times_ms, text_acc, wall_ms) =
-            tokio::task::spawn_blocking(move || -> Result<(Option<f64>, Option<String>, u64, Vec<f64>, String, f64), String> {
+            tokio::task::spawn_blocking(move || -> Result<StreamOutcome, String> {
                 use std::io::{BufRead, BufReader, Write};
                 use std::net::TcpStream;
                 let start = Instant::now();
