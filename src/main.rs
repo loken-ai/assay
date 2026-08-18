@@ -85,12 +85,12 @@ Specifically address: 1) handling of trailing commas, 2) RFC 4180 compliance for
 embedded newlines, 3) memory allocation patterns, 4) UTF-8 correctness, 5) error \
 handling for malformed input. For each issue, show a corrected snippet.";
 
-// The `2.5K` perimeter prompt: a single ~4 K-token request that fills the KV
-// cache (the completion length matches the other cells, so the column isolates
-// decode-rate falloff as KV grows). This is the ACTUAL prompt the campaigns used
-// (extracted verbatim from rebench030_25k.json's custom_prompt) — a Q4_K /
-// Blackwell-GPU kernel review — kept in-tree so the bench is reproducible.
-// Previously passed via an unpreserved external --prompt-file.
+// The `2.5k` prompt: a long single request that fills the KV cache while asking for the
+// same completion length as the other cells, so the column isolates decode-rate falloff as
+// KV grows rather than mixing in a different output size. The text is a technical article on
+// processor architecture followed by comprehension questions — long, ordinary English prose,
+// chosen because it tokenises the way real input does. Kept in-tree rather than passed by
+// path, so a run is reproducible from the repository alone.
 const PROMPT_2_5K: &str = include_str!("../prompts/p2_5k.txt");
 
 /// Resolve a built-in prompt name to its content; returns None if unknown.
@@ -165,9 +165,9 @@ struct Args {
 
     /// Give every iteration a prompt no engine has seen, by prefixing a counter.
     ///
-    /// Both engines reuse a computed prefix, so replaying one prompt measures that cache
-    /// rather than the prefill: 6000 tokens came back in 9 ms, which is not a rate. Use
-    /// this whenever the prefill figure is the point.
+    /// Engines reuse a computed prefix, so replaying one prompt measures that cache rather
+    /// than the prefill — the figure that comes back is a cache hit wearing a rate's units.
+    /// Use this whenever the prefill number is the point.
     #[arg(long)]
     pub unique_prompt: bool,
 
@@ -205,8 +205,7 @@ struct Args {
     /// Compare current run against a previous bench JSON. Per-cell
     /// completion_tok_s deltas printed at the end. Warns if model
     /// fingerprints differ between runs (model was re-pulled — the
-    /// "regression" is then not a code regression, see
-    /// project_deepcoder_bisect_2026_05_25.md).
+    /// "regression" is then a different set of weights, not different code).
     #[arg(long)]
     baseline: Option<String>,
 
@@ -249,9 +248,9 @@ struct Args {
     /// Coherence-gate substring. After every cell prints, if --image and
     /// --require-substr are both set, fail any iteration whose response
     /// preview doesn't contain (case-insensitive) at least one of the
-    /// comma-separated substrings. Catches the Z-Image black-PNG /
-    /// gemma4 "three three three" failure modes where tok/s looks
-    /// healthy but output is garbage.
+    /// comma-separated substrings. For runs where a model can answer fast and wrong: a
+    /// degenerate completion produces an ordinary token rate, so throughput alone cannot
+    /// tell it from a good one.
     #[arg(long, value_delimiter = ',')]
     require_substr: Vec<String>,
 
@@ -293,9 +292,8 @@ struct CellResult<'a> {
     model: String,
     /// Captured at cell start from /api/show: (modified_at, parameter_size,
     /// quantization_level). Used so cross-session perf comparisons can
-    /// verify model identity — Ollama auto-pulls update the underlying
-    /// GGUF mid-bench-history, causing phantom regressions if not pinned.
-    /// See project_deepcoder_bisect_2026_05_25.md
+    /// verify model identity: a tag that has been re-pulled between two runs can point at
+    /// different weights, and the delta then measures the checkpoint rather than the code.
     model_fingerprint: Option<(String, String, String)>,
     num_ctx: usize,
     prompt_name: String,
@@ -311,8 +309,8 @@ struct CellResult<'a> {
     load_time_ms: Option<f64>,
     stats: Vec<Stats>,
     /// First-iteration response preview shown after the cell completes. Used
-    /// for the coherence eyeball check — distinguishes a real WIN from a
-    /// fast-but-garbage WIN (Z-Image black-PNG, gemma4 "three three three").
+    /// for the coherence check by eye — a fast answer and a fast wrong answer have the
+    /// same rate, and only the text separates them.
     first_response_preview: Option<String>,
     /// Coherence pass/fail flag. Always set when the cell produced text: a
     /// degenerate answer fails on its own shape, and `--require-substr` adds an
@@ -419,8 +417,8 @@ async fn main() {
 
     // Load + base64-encode the image once at startup (if --image was given).
     // We hold base64 in memory across the entire sweep so per-iteration
-    // latency only includes the HTTP send — JPEG decode would otherwise add
-    // ~1-3ms of variance that has nothing to do with the model.
+    // latency only includes the HTTP send — decoding the file per iteration would add
+    // variance that has nothing to do with the model.
     let image_b64: Option<Vec<String>> = match args.image.as_deref() {
         Some(path) => {
             use base64::Engine;
@@ -646,9 +644,8 @@ async fn main() {
                 println!("ok={} skip={}", ok, skipped);
             }
             // Wait for VRAM to actually drop before loading the next
-            // model. Ollama's keep_alive=0 returns 200 OK immediately but
-            // the actual VRAM release is asynchronous (Ollama's runner
-            // process holds it for ~10-30s). Polling nvidia-smi is more
+            // model. An unload request can return before the memory is actually back:
+            // the runner process holding it exits on its own schedule. Polling is more
             // reliable than a fixed sleep — without this, the next
             // model loads into a contended VRAM and falls back to CPU.
             // Skipped for vLLM: its model is resident for the server's
@@ -916,7 +913,7 @@ fn compare_to_baseline(path: &str, cells: &[CellResult]) {
     if drift_warned {
         println!();
         println!("  NOTE: Some cells had model fingerprint drift — those deltas are NOT");
-        println!("  code-vs-code comparisons. See project_deepcoder_bisect_2026_05_25.md.");
+        println!("  code-vs-code comparisons — the weights themselves differ between runs.");
     }
 }
 
@@ -1266,8 +1263,8 @@ async fn run_cell<'a>(
 
     // Coherence gate. If --require-substr was set, each iteration's preview
     // must contain at least one required substring (case-insensitive). A
-    // single failure marks the whole cell incoherent so a fast-but-garbage
-    // run can't be claimed as a WIN.
+    // single failure marks the whole cell incoherent, so a run that was fast and wrong
+    // cannot be reported as a rate.
     let needles: Vec<String> = require_substr.iter().map(|s| s.to_lowercase()).collect();
     let mut degenerate = None;
     let mut missing_substr = false;
@@ -1334,9 +1331,9 @@ async fn run_cell<'a>(
     if let Some(s) = Stats::compute("Completion tok/s", "tok/s", &comp_tps) {
         stats.push(s);
     }
-    // Length-invariant decode rate — fair comparison when servers have
-    // different EOS handling (chat-tuned models). See
-    // project_bench_apples_oranges_2026_05_26.md.
+    // Length-invariant decode rate. Two servers that stop at different lengths still get
+    // compared on the same quantity: milliseconds spent per token produced, which does not
+    // move when one of them emits twice as many tokens.
     let decode_ms: Vec<f64> = all_metrics
         .iter()
         .filter_map(|m| m.decode_ms_per_token)

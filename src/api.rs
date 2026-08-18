@@ -42,9 +42,9 @@ pub struct GenerateRequest {
     pub images: Option<Vec<String>>,
     /// Disable thinking so reasoning models (gemma4, qwen3, deepcoder) emit their
     /// DIRECT answer into `response` instead of a separate thinking channel.
-    /// Without this, ollama returns an empty `response` for gemma4 (its thinking
-    /// output is dropped — looked "broken") and a thinking-vs-content mismatch for
-    /// qwen3. `think` is ollama's field, `thinking` is LOKEN's; each engine
+    /// Without it a reasoning model can return an empty `response` with its output routed
+    /// to the thinking channel instead, which reads as a broken cell rather than a
+    /// configuration one. `think` is ollama's field, `thinking` is LOKEN's; each engine
     /// ignores the other's, so both end up emitting content → fair comparison.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub think: Option<bool>,
@@ -195,8 +195,7 @@ pub struct IterationMetrics {
     /// per-token decode rate — DOES NOT depend on prompt length or
     /// num_predict ceiling. Use this for fair cross-server comparison
     /// when models have different EOS behavior (chat-tuned models
-    /// where Ollama generates to cap and LOKEN respects EOS).
-    /// See project_bench_apples_oranges_2026_05_26.md.
+    /// where one server generates to the cap and another stops at EOS).
     pub decode_ms_per_token: Option<f64>,
     /// End-to-end latency (ms) from server
     pub e2e_latency_ms: f64,
@@ -214,8 +213,8 @@ pub struct IterationMetrics {
     /// Only populated for streaming requests. Empty for non-streaming.
     pub inter_token_latencies_ms: Vec<f64>,
     /// First ~120 chars of generated text. Used for the per-cell coherence
-    /// preview so a fast-but-garbage response (Z-Image black-PNG, gemma4
-    /// "three three three") doesn't get logged as a WIN.
+    /// preview, so an answer that is fast and degenerate is not recorded as a fast one:
+    /// both produce an ordinary token rate and only the text tells them apart.
     pub response_preview: Option<String>,
     /// Client wall-clock time (ms, from request start) of the first generated
     /// token. Marks the prefill→decode boundary so the energy sampler can
@@ -330,9 +329,9 @@ impl BenchClient {
 
     /// Capture model fingerprint via /api/show: returns (modified_at,
     /// parameter_size, quantization_level). Used to tag bench output JSON
-    /// so cross-session comparisons can verify model identity (Ollama
-    /// auto-pulls update the underlying GGUF mid-bench-history, causing
-    /// phantom regressions — see project_deepcoder_bisect_2026_05_25).
+    /// so cross-session comparisons can verify model identity: a tag that has been
+    /// re-pulled between two runs can point at different weights, and a delta measured
+    /// across that is a checkpoint change rather than a code change.
     /// Returns None if the model doesn't exist or /api/show fails.
     pub async fn model_fingerprint(&self, model: &str) -> Option<(String, String, String)> {
         // vLLM has no /api/show equivalent; identity is fixed at server launch.
@@ -478,11 +477,9 @@ impl BenchClient {
         }
         let url = format!("{}/api/generate", self.base_url);
         // Send keep_alive as a JSON-Value-typed body so we can use the integer
-        // form. Ollama accepts both string and integer; some Ollama versions
-        // ignore the string form silently and never actually unload, leaving
-        // the runner subprocess holding VRAM. The integer form is universally
-        // honoured. LOKEN now also accepts both forms after the
-        // deserialize_keep_alive helper landed.
+        // form, which every version accepts. The string form is also accepted but has not
+        // behaved identically across the versions this was tested against, and an unload
+        // that silently does nothing leaves the next cell measuring a contended machine.
         let body = serde_json::json!({
             "model": model,
             "prompt": "",
@@ -578,11 +575,10 @@ impl BenchClient {
         opts.insert("num_predict".into(), serde_json::Value::from(max_tokens));
         // Greedy decode for benchmarking: deterministic, reproducible, and it
         // measures pure decode speed. Without an explicit temperature each
-        // engine falls back to its own default (ollama 0.8, LOKEN's config
-        // default) and runs the full sampling path — softmax + top-k/top-p +
-        // multinomial — which is ~1.7 ms/token slower than argmax and varies by
-        // engine, confounding the decode-rate comparison. Temperature 0 = argmax
-        // on every engine (ollama, LOKEN, vLLM).
+        // engine falls back to its own default and runs the full sampling path — softmax,
+        // top-k/top-p, multinomial — whose cost differs per implementation and lands inside
+        // the decode rate. Temperature 0 is argmax everywhere, which removes that term from
+        // the comparison instead of averaging three different ones.
         opts.insert("temperature".into(), serde_json::Value::from(0.0));
         if let Some(ctx) = num_ctx {
             opts.insert("num_ctx".into(), serde_json::Value::from(ctx));
@@ -1177,8 +1173,8 @@ fn truncate_preview(s: &str) -> String {
 /// Uniform decode-rate criterion used for EVERY engine (Ollama, LOKEN,
 /// vLLM): tokens-after-the-first divided by the client-observed wall time from
 /// the first to the last generated token. It deliberately ignores any
-/// server-reported timing field so the comparison is identical across engines
-/// ("mêmes critères pour tous"), and it excludes prefill/TTFT by starting the
+/// server-reported timing field, so every engine is judged by the same clock rather than by
+/// its own bookkeeping, and it excludes prefill/TTFT by starting the
 /// clock at the first token. Accuracy depends on the read loop not throttling
 /// the stream — hence the lean reader in `generate_stream`.
 fn steady_decode_tok_s(token_times_ms: &[f64]) -> Option<f64> {
