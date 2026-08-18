@@ -112,7 +112,8 @@ impl EnergyWindow {
     /// Carbon per generated token (gCO2eq/tok) for the given grid intensity
     /// (gCO2/kWh). gCO2/tok = Wh/tok × CI / 1000.
     pub fn gco2_per_tok(&self, tokens: u64, carbon_intensity: f64) -> Option<f64> {
-        self.wh_per_tok(tokens).map(|wh| wh * carbon_intensity / 1000.0)
+        self.wh_per_tok(tokens)
+            .map(|wh| wh * carbon_intensity / 1000.0)
     }
 
     /// Decode-phase energy per generated token (J/tok), excluding prefill.
@@ -150,7 +151,11 @@ enum RaplKind {
 
 /// Read a u128 from a sysfs file, trimming whitespace.
 fn read_u128(path: &std::path::Path) -> Option<u128> {
-    std::fs::read_to_string(path).ok()?.trim().parse::<u128>().ok()
+    std::fs::read_to_string(path)
+        .ok()?
+        .trim()
+        .parse::<u128>()
+        .ok()
 }
 
 /// Discover all RAPL package + dram domains under /sys/class/powercap.
@@ -173,7 +178,13 @@ fn discover_rapl() -> (Vec<RaplDomain>, bool) {
         }
         let pkg_dir = e.path();
         // The package domain itself.
-        push_domain(&pkg_dir, RaplKind::Package, &mut domains, &mut any_eacces, &mut any_readable);
+        push_domain(
+            &pkg_dir,
+            RaplKind::Package,
+            &mut domains,
+            &mut any_eacces,
+            &mut any_readable,
+        );
         // Sub-domains intel-rapl:N:M — look for one named "dram".
         if let Ok(subs) = std::fs::read_dir(&pkg_dir) {
             for s in subs.flatten() {
@@ -185,7 +196,13 @@ fn discover_rapl() -> (Vec<RaplDomain>, bool) {
                 let sub_dir = s.path();
                 let label = std::fs::read_to_string(sub_dir.join("name")).unwrap_or_default();
                 if label.trim() == "dram" {
-                    push_domain(&sub_dir, RaplKind::Dram, &mut domains, &mut any_eacces, &mut any_readable);
+                    push_domain(
+                        &sub_dir,
+                        RaplKind::Dram,
+                        &mut domains,
+                        &mut any_eacces,
+                        &mut any_readable,
+                    );
                 }
             }
         }
@@ -217,12 +234,19 @@ fn push_domain(
         Err(_) => {}
     }
     let max_range_uj = read_u128(&dir.join("max_energy_range_uj")).unwrap_or(u128::MAX);
-    out.push(RaplDomain { energy_uj_path, max_range_uj, kind });
+    out.push(RaplDomain {
+        energy_uj_path,
+        max_range_uj,
+        kind,
+    });
 }
 
 /// Read all domains' current energy (µJ). None entries are domains that failed.
 fn rapl_snapshot(domains: &[RaplDomain]) -> Vec<Option<u128>> {
-    domains.iter().map(|d| read_u128(&d.energy_uj_path)).collect()
+    domains
+        .iter()
+        .map(|d| read_u128(&d.energy_uj_path))
+        .collect()
 }
 
 /// Delta between two RAPL snapshots in joules, split by kind, handling wrap.
@@ -234,8 +258,10 @@ fn rapl_delta_j(
     let mut pkg_j = 0.0;
     let mut dram_j = 0.0;
     for (i, d) in domains.iter().enumerate() {
-        let (Some(s), Some(e)) = (start.get(i).copied().flatten(), end.get(i).copied().flatten())
-        else {
+        let (Some(s), Some(e)) = (
+            start.get(i).copied().flatten(),
+            end.get(i).copied().flatten(),
+        ) else {
             continue;
         };
         let delta_uj = if e >= s {
@@ -330,7 +356,9 @@ impl EnergySampler {
         let (power_stop, power_handle) = if gpu_start_j.is_none() {
             let stop = Arc::new(AtomicBool::new(false));
             let stop_c = stop.clone();
-            let h = tokio::task::spawn_blocking(move || power_integrate_loop(stop_c, power_interval_ms));
+            let h = tokio::task::spawn_blocking(move || {
+                power_integrate_loop(stop_c, power_interval_ms)
+            });
             (Some(stop), Some(h))
         } else {
             (None, None)
@@ -349,8 +377,13 @@ impl EnergySampler {
             let gpu0 = gpu_start_j.unwrap_or(0.0);
             Some(tokio::task::spawn_blocking(move || {
                 energy_trace_loop(
-                    stop_c, trace_c, power_interval_ms, start_instant, gpu0,
-                    domains_c, rapl_start_c,
+                    stop_c,
+                    trace_c,
+                    power_interval_ms,
+                    start_instant,
+                    gpu0,
+                    domains_c,
+                    rapl_start_c,
                 )
             }))
         } else {
@@ -412,7 +445,10 @@ impl EnergySampler {
         let (cpu_pkg_energy_j, dram_energy_j) =
             rapl_delta_j(&self.rapl_domains, &self.rapl_start, &rapl_end);
         let cpu_rapl_available = self.rapl_readable
-            && self.rapl_domains.iter().any(|d| d.kind == RaplKind::Package)
+            && self
+                .rapl_domains
+                .iter()
+                .any(|d| d.kind == RaplKind::Package)
             && cpu_pkg_energy_j > 0.0;
         let dram_rapl_available = self.rapl_readable
             && self.rapl_domains.iter().any(|d| d.kind == RaplKind::Dram)
@@ -492,7 +528,12 @@ fn cum_at(trace: &[EnergyTrace], t: f64) -> EnergyTrace {
             return *first;
         }
     } else {
-        return EnergyTrace { t_s: t, gpu_j: 0.0, pkg_j: 0.0, dram_j: 0.0 };
+        return EnergyTrace {
+            t_s: t,
+            gpu_j: 0.0,
+            pkg_j: 0.0,
+            dram_j: 0.0,
+        };
     }
     let last = *trace.last().unwrap();
     if t >= last.t_s {
@@ -539,7 +580,12 @@ fn energy_trace_loop(
         let snap = rapl_snapshot(&domains);
         let (pkg_j, dram_j) = rapl_delta_j(&domains, &rapl_start, &snap);
         if let Ok(mut g) = trace.lock() {
-            g.push(EnergyTrace { t_s, gpu_j, pkg_j, dram_j });
+            g.push(EnergyTrace {
+                t_s,
+                gpu_j,
+                pkg_j,
+                dram_j,
+            });
         }
         if stop.load(Ordering::Relaxed) {
             break;
@@ -579,7 +625,11 @@ impl Drop for EnergySampler {
 }
 
 /// Compose a human-readable note about any unavailable domain.
-fn build_note(domains: &[RaplDomain], rapl_readable: bool, gpu_path: GpuEnergyPath) -> Option<String> {
+fn build_note(
+    domains: &[RaplDomain],
+    rapl_readable: bool,
+    gpu_path: GpuEnergyPath,
+) -> Option<String> {
     let mut parts = Vec::new();
     let have_rapl_files = !domains.is_empty();
     if have_rapl_files && !rapl_readable {
@@ -593,9 +643,8 @@ fn build_note(domains: &[RaplDomain], rapl_readable: bool, gpu_path: GpuEnergyPa
     }
     match gpu_path {
         GpuEnergyPath::None => parts.push("GPU energy unavailable (no NVML/GPU)".to_string()),
-        GpuEnergyPath::PowerIntegration => {
-            parts.push("GPU energy via power.draw integration (NVML energy counter absent)".to_string())
-        }
+        GpuEnergyPath::PowerIntegration => parts
+            .push("GPU energy via power.draw integration (NVML energy counter absent)".to_string()),
         GpuEnergyPath::NvmlCounter => {}
     }
     if parts.is_empty() {
@@ -699,14 +748,23 @@ mod tests {
 
         // No split available: fall back to the full window rather than to None,
         // so a machine without the boundary still reports a real number.
-        let no_split = EnergyWindow { decode_energy_j: None, ..base.clone() };
+        let no_split = EnergyWindow {
+            decode_energy_j: None,
+            ..base.clone()
+        };
         assert!((no_split.j_per_decode_tok(60).unwrap() - 2.0).abs() < 1e-9);
 
         // A zero-energy split is not a measurement; it must not report 0 J/tok.
-        let zero_split = EnergyWindow { decode_energy_j: Some(0.0), ..base.clone() };
+        let zero_split = EnergyWindow {
+            decode_energy_j: Some(0.0),
+            ..base.clone()
+        };
         assert!((zero_split.j_per_decode_tok(60).unwrap() - 2.0).abs() < 1e-9);
 
-        assert!(base.j_per_decode_tok(0).is_none(), "zero tokens has no per-token value");
+        assert!(
+            base.j_per_decode_tok(0).is_none(),
+            "zero tokens has no per-token value"
+        );
     }
 
     #[test]
@@ -729,7 +787,10 @@ mod tests {
             decode_duration_s: None,
         };
         assert!(w.j_per_tok(60).is_none());
-        let w2 = EnergyWindow { energy_j: 10.0, ..w };
+        let w2 = EnergyWindow {
+            energy_j: 10.0,
+            ..w
+        };
         assert!(w2.j_per_tok(0).is_none());
     }
 
@@ -755,7 +816,8 @@ mod tests {
             max_range_uj: 1_000_000_000,
             kind: RaplKind::Dram,
         }];
-        let (_pkg, dram) = rapl_delta_j(&dom, &vec![Some(1_000_000u128)], &vec![Some(3_000_000u128)]);
+        let (_pkg, dram) =
+            rapl_delta_j(&dom, &vec![Some(1_000_000u128)], &vec![Some(3_000_000u128)]);
         // 2_000_000 µJ = 2.0 J
         assert!((dram - 2.0).abs() < 1e-9);
     }

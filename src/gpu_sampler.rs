@@ -9,8 +9,8 @@
 //! In that case `start()` returns a no-op sampler and `stop()` returns an empty Vec.
 
 use serde::Serialize;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 
@@ -50,9 +50,7 @@ impl GpuSampler {
 
         // Try to initialize NVML on the spawned thread; if it fails we still return
         // a valid (but empty) sampler so callers don't have to special-case the error.
-        let handle = tokio::task::spawn_blocking(move || {
-            sample_loop(stop_flag_clone, interval_ms)
-        });
+        let handle = tokio::task::spawn_blocking(move || sample_loop(stop_flag_clone, interval_ms));
 
         Self {
             stop_flag,
@@ -94,7 +92,8 @@ fn sample_loop(stop_flag: Arc<AtomicBool>, interval_ms: u64) -> Vec<GpuSample> {
     // Cache GPU names and pre-allocate sample buffers.
     let mut names: Vec<String> = Vec::with_capacity(count as usize);
     for i in 0..count {
-        let name = nvml.device_by_index(i)
+        let name = nvml
+            .device_by_index(i)
             .ok()
             .and_then(|d| d.name().ok())
             .unwrap_or_else(|| format!("GPU {}", i));
@@ -109,47 +108,61 @@ fn sample_loop(stop_flag: Arc<AtomicBool>, interval_ms: u64) -> Vec<GpuSample> {
                 Ok(d) => d,
                 Err(_) => continue,
             };
-            let vram_mb = dev.memory_info().map(|m| m.used / (1024 * 1024)).unwrap_or(0);
+            let vram_mb = dev
+                .memory_info()
+                .map(|m| m.used / (1024 * 1024))
+                .unwrap_or(0);
             let util_pct = dev.utilization_rates().map(|u| u.gpu).unwrap_or(0);
             // power_usage returns milliwatts
-            let power_w = dev.power_usage().map(|mw| mw as f64 / 1000.0).unwrap_or(0.0);
-            buffers[i as usize].push(RawSample { vram_mb, util_pct, power_w });
+            let power_w = dev
+                .power_usage()
+                .map(|mw| mw as f64 / 1000.0)
+                .unwrap_or(0.0);
+            buffers[i as usize].push(RawSample {
+                vram_mb,
+                util_pct,
+                power_w,
+            });
         }
         std::thread::sleep(interval);
     }
 
     // Aggregate per-GPU
-    buffers.into_iter().enumerate().map(|(i, samples)| {
-        let n = samples.len();
-        if n == 0 {
-            return GpuSample {
+    buffers
+        .into_iter()
+        .enumerate()
+        .map(|(i, samples)| {
+            let n = samples.len();
+            if n == 0 {
+                return GpuSample {
+                    gpu_index: i as u32,
+                    gpu_name: names[i].clone(),
+                    vram_peak_mb: 0,
+                    vram_avg_mb: 0,
+                    util_peak_pct: 0,
+                    util_avg_pct: 0,
+                    power_peak_w: 0.0,
+                    power_avg_w: 0.0,
+                    samples: 0,
+                };
+            }
+            let vram_peak = samples.iter().map(|s| s.vram_mb).max().unwrap_or(0);
+            let vram_avg = samples.iter().map(|s| s.vram_mb).sum::<u64>() / n as u64;
+            let util_peak = samples.iter().map(|s| s.util_pct).max().unwrap_or(0);
+            let util_avg = samples.iter().map(|s| s.util_pct).sum::<u32>() / n as u32;
+            let power_peak = samples.iter().map(|s| s.power_w).fold(0.0_f64, f64::max);
+            let power_avg = samples.iter().map(|s| s.power_w).sum::<f64>() / n as f64;
+            GpuSample {
                 gpu_index: i as u32,
                 gpu_name: names[i].clone(),
-                vram_peak_mb: 0,
-                vram_avg_mb: 0,
-                util_peak_pct: 0,
-                util_avg_pct: 0,
-                power_peak_w: 0.0,
-                power_avg_w: 0.0,
-                samples: 0,
-            };
-        }
-        let vram_peak = samples.iter().map(|s| s.vram_mb).max().unwrap_or(0);
-        let vram_avg = samples.iter().map(|s| s.vram_mb).sum::<u64>() / n as u64;
-        let util_peak = samples.iter().map(|s| s.util_pct).max().unwrap_or(0);
-        let util_avg = samples.iter().map(|s| s.util_pct).sum::<u32>() / n as u32;
-        let power_peak = samples.iter().map(|s| s.power_w).fold(0.0_f64, f64::max);
-        let power_avg = samples.iter().map(|s| s.power_w).sum::<f64>() / n as f64;
-        GpuSample {
-            gpu_index: i as u32,
-            gpu_name: names[i].clone(),
-            vram_peak_mb: vram_peak,
-            vram_avg_mb: vram_avg,
-            util_peak_pct: util_peak,
-            util_avg_pct: util_avg,
-            power_peak_w: power_peak,
-            power_avg_w: power_avg,
-            samples: n,
-        }
-    }).collect()
+                vram_peak_mb: vram_peak,
+                vram_avg_mb: vram_avg,
+                util_peak_pct: util_peak,
+                util_avg_pct: util_avg,
+                power_peak_w: power_peak,
+                power_avg_w: power_avg,
+                samples: n,
+            }
+        })
+        .collect()
 }

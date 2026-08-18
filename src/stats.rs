@@ -73,7 +73,11 @@ impl Stats {
 
     /// Format mean +/- stddev
     pub fn fmt_mean_std(&self) -> String {
-        format!("{} +/-{}", self.fmt_val(self.mean), self.fmt_val(self.stddev))
+        format!(
+            "{} +/-{}",
+            self.fmt_val(self.mean),
+            self.fmt_val(self.stddev)
+        )
     }
 }
 
@@ -93,7 +97,14 @@ fn percentile(sorted: &[f64], pct: f64) -> f64 {
 }
 
 /// Print a stats table for a single server run
-pub fn print_table(server_url: &str, model: &str, prompt_len: usize, max_tokens: usize, iterations: usize, stats: &[Stats]) {
+pub fn print_table(
+    server_url: &str,
+    model: &str,
+    prompt_len: usize,
+    max_tokens: usize,
+    iterations: usize,
+    stats: &[Stats],
+) {
     let width = 72;
     let border = "=".repeat(width);
     let thin = "-".repeat(width);
@@ -104,7 +115,10 @@ pub fn print_table(server_url: &str, model: &str, prompt_len: usize, max_tokens:
     println!("  {}", thin);
     println!("  Server:     {}", server_url);
     println!("  Model:      {}", model);
-    println!("  Prompt:     ~{} chars, max {} tokens, {} iterations", prompt_len, max_tokens, iterations);
+    println!(
+        "  Prompt:     ~{} chars, max {} tokens, {} iterations",
+        prompt_len, max_tokens, iterations
+    );
     println!("  {}", thin);
     println!(
         "  {:<22} {:>10} {:>10} {:>10} {:>10} {:>10}",
@@ -128,12 +142,7 @@ pub fn print_table(server_url: &str, model: &str, prompt_len: usize, max_tokens:
 }
 
 /// Print a comparison table between two server runs
-pub fn print_comparison(
-    label_a: &str,
-    stats_a: &[Stats],
-    label_b: &str,
-    stats_b: &[Stats],
-) {
+pub fn print_comparison(label_a: &str, stats_a: &[Stats], label_b: &str, stats_b: &[Stats]) {
     let width = 80;
     let border = "=".repeat(width);
     let thin = "-".repeat(width);
@@ -144,10 +153,7 @@ pub fn print_comparison(
     println!("  {}", thin);
     println!(
         "  {:<22} {:>16} {:>16} {:>10}",
-        "Metric",
-        label_a,
-        label_b,
-        "Speedup"
+        "Metric", label_a, label_b, "Speedup"
     );
     println!("  {}", thin);
 
