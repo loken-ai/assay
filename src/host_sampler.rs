@@ -34,7 +34,10 @@ impl HostSampler {
         let flag = stop_flag.clone();
         let names: Vec<String> = names.iter().map(|s| s.to_string()).collect();
         let handle = tokio::task::spawn_blocking(move || sample_loop(flag, interval_ms, names));
-        Self { stop_flag, handle: Some(handle) }
+        Self {
+            stop_flag,
+            handle: Some(handle),
+        }
     }
 
     pub async fn stop(mut self) -> Option<HostSample> {
@@ -55,23 +58,39 @@ impl Drop for HostSampler {
 /// (rss_kb + swap_kb, swap_kb, cpu_jiffies) summed over the matching pids.
 fn snapshot(names: &[String]) -> (u64, u64, u64) {
     let (mut rss, mut swap, mut jiffies) = (0u64, 0u64, 0u64);
-    let Ok(dir) = std::fs::read_dir("/proc") else { return (0, 0, 0) };
+    let Ok(dir) = std::fs::read_dir("/proc") else {
+        return (0, 0, 0);
+    };
     for e in dir.flatten() {
         let p = e.path();
-        let Some(pid) = p.file_name().and_then(|f| f.to_str()) else { continue };
+        let Some(pid) = p.file_name().and_then(|f| f.to_str()) else {
+            continue;
+        };
         if !pid.bytes().all(|b| b.is_ascii_digit()) {
             continue;
         }
-        let Ok(comm) = std::fs::read_to_string(p.join("comm")) else { continue };
+        let Ok(comm) = std::fs::read_to_string(p.join("comm")) else {
+            continue;
+        };
         if !names.iter().any(|n| comm.trim() == n) {
             continue;
         }
         if let Ok(st) = std::fs::read_to_string(p.join("status")) {
             for l in st.lines() {
                 if let Some(v) = l.strip_prefix("VmRSS:") {
-                    rss += v.trim().trim_end_matches(" kB").trim().parse::<u64>().unwrap_or(0);
+                    rss += v
+                        .trim()
+                        .trim_end_matches(" kB")
+                        .trim()
+                        .parse::<u64>()
+                        .unwrap_or(0);
                 } else if let Some(v) = l.strip_prefix("VmSwap:") {
-                    swap += v.trim().trim_end_matches(" kB").trim().parse::<u64>().unwrap_or(0);
+                    swap += v
+                        .trim()
+                        .trim_end_matches(" kB")
+                        .trim()
+                        .parse::<u64>()
+                        .unwrap_or(0);
                 }
             }
         }
@@ -80,7 +99,8 @@ fn snapshot(names: &[String]) -> (u64, u64, u64) {
             if let Some(rest) = stat.rsplit(')').next() {
                 let f: Vec<&str> = rest.split_whitespace().collect();
                 if f.len() > 12 {
-                    jiffies += f[11].parse::<u64>().unwrap_or(0) + f[12].parse::<u64>().unwrap_or(0);
+                    jiffies +=
+                        f[11].parse::<u64>().unwrap_or(0) + f[12].parse::<u64>().unwrap_or(0);
                 }
             }
         }

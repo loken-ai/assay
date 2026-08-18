@@ -250,7 +250,14 @@ impl BenchClient {
             .tcp_nodelay(true) // deliver each streamed token promptly, no Nagle batching
             .build()
             .expect("Failed to create HTTP client");
-        Self { base_url, http, verbose, protocol, num_gpu: None, main_gpu: None }
+        Self {
+            base_url,
+            http,
+            verbose,
+            protocol,
+            num_gpu: None,
+            main_gpu: None,
+        }
     }
 
     /// Force `num_gpu` in the Ollama options (e.g. 0 for a CPU-only bench).
@@ -300,9 +307,14 @@ impl BenchClient {
                 Ok(v) => v,
                 Err(_) => return false,
             };
-            let ids: Vec<&str> = v.get("data")
+            let ids: Vec<&str> = v
+                .get("data")
                 .and_then(|d| d.as_array())
-                .map(|arr| arr.iter().filter_map(|m| m.get("id").and_then(|i| i.as_str())).collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|m| m.get("id").and_then(|i| i.as_str()))
+                        .collect()
+                })
                 .unwrap_or_default();
             // Exact match preferred; otherwise accept any served model so the
             // bench alias need not equal the HF repo id.
@@ -330,12 +342,28 @@ impl BenchClient {
         let url = format!("{}/api/show", self.base_url);
         let body = serde_json::json!({ "model": model });
         let resp = self.http.post(&url).json(&body).send().await.ok()?;
-        if !resp.status().is_success() { return None; }
+        if !resp.status().is_success() {
+            return None;
+        }
         let v: serde_json::Value = resp.json().await.ok()?;
-        let modified = v.get("modified_at").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let params = v.pointer("/details/parameter_size").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let quant = v.pointer("/details/quantization_level").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        if modified.is_empty() && params.is_empty() { return None; }
+        let modified = v
+            .get("modified_at")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let params = v
+            .pointer("/details/parameter_size")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let quant = v
+            .pointer("/details/quantization_level")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        if modified.is_empty() && params.is_empty() {
+            return None;
+        }
         Some((modified, params, quant))
     }
 
@@ -487,7 +515,10 @@ impl BenchClient {
             return if self.model_exists(model).await {
                 Ok((0.0, None))
             } else {
-                Err(format!("vLLM target at {} not reachable / not serving '{}'", self.base_url, model))
+                Err(format!(
+                    "vLLM target at {} not reachable / not serving '{}'",
+                    self.base_url, model
+                ))
             };
         }
         let url = format!("{}/api/generate", self.base_url);
@@ -518,12 +549,17 @@ impl BenchClient {
         self.log_response_status(&url, resp.status());
         if !resp.status().is_success() {
             let text = resp.text().await.unwrap_or_default();
-            if self.verbose { eprintln!("    <-- {}", text); }
+            if self.verbose {
+                eprintln!("    <-- {}", text);
+            }
             return Err(format!("Load failed: {}", text));
         }
 
         let wall_ms = start.elapsed().as_secs_f64() * 1000.0;
-        let body: GenerateResponse = resp.json().await.map_err(|e| format!("Parse error: {}", e))?;
+        let body: GenerateResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("Parse error: {}", e))?;
         self.log_response_body(&body);
         let server_load_ms = body.load_duration.map(|ns| ns as f64 / 1_000_000.0);
 
@@ -580,14 +616,22 @@ impl BenchClient {
         if self.protocol == Protocol::OpenAI {
             // num_ctx (fixed at server launch) and session_id (no prefix-KV
             // reuse API) don't apply to the OpenAI completions path.
-            return self.generate_openai(model, prompt, max_tokens, images).await;
+            return self
+                .generate_openai(model, prompt, max_tokens, images)
+                .await;
         }
         let url = format!("{}/api/generate", self.base_url);
         let req = GenerateRequest {
             model: model.to_string(),
             prompt: prompt.to_string(),
             stream: false,
-            options: Some(Self::build_options(max_tokens, num_ctx, session_id, self.num_gpu, self.main_gpu)),
+            options: Some(Self::build_options(
+                max_tokens,
+                num_ctx,
+                session_id,
+                self.num_gpu,
+                self.main_gpu,
+            )),
             keep_alive: Some("30m".to_string()),
             images: images.map(<[String]>::to_vec),
             think: Some(false),
@@ -615,11 +659,16 @@ impl BenchClient {
         self.log_response_status(&url, resp.status());
         if !resp.status().is_success() {
             let text = resp.text().await.unwrap_or_default();
-            if self.verbose { eprintln!("    <-- {}", text); }
+            if self.verbose {
+                eprintln!("    <-- {}", text);
+            }
             return Err(format!("Generate failed: {}", text));
         }
 
-        let body: GenerateResponse = resp.json().await.map_err(|e| format!("Parse error: {}", e))?;
+        let body: GenerateResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("Parse error: {}", e))?;
         self.log_response_body(&body);
 
         // Surface in-band server errors (HTTP 200 with an error string in `response`).
@@ -664,10 +713,10 @@ impl BenchClient {
             decode_ms_per_token,
             e2e_latency_ms,
             tokens_generated: body.eval_count,
-            content_tokens: None,  // non-streaming has no chunk count
+            content_tokens: None, // non-streaming has no chunk count
             inter_token_latencies_ms: Vec::new(),
             response_preview: Some(truncate_preview(&body.response)),
-            first_token_wall_ms: None,  // non-streaming has no per-token timing
+            first_token_wall_ms: None, // non-streaming has no per-token timing
         })
     }
 
@@ -684,14 +733,22 @@ impl BenchClient {
         session_id: Option<&str>,
     ) -> Result<IterationMetrics, String> {
         if self.protocol == Protocol::OpenAI {
-            return self.generate_stream_openai(model, prompt, max_tokens, images).await;
+            return self
+                .generate_stream_openai(model, prompt, max_tokens, images)
+                .await;
         }
         let url = format!("{}/api/generate", self.base_url);
         let req = GenerateRequest {
             model: model.to_string(),
             prompt: prompt.to_string(),
             stream: true,
-            options: Some(Self::build_options(max_tokens, num_ctx, session_id, self.num_gpu, self.main_gpu)),
+            options: Some(Self::build_options(
+                max_tokens,
+                num_ctx,
+                session_id,
+                self.num_gpu,
+                self.main_gpu,
+            )),
             keep_alive: Some("30m".to_string()),
             images: images.map(<[String]>::to_vec),
             think: Some(false),
@@ -811,8 +868,9 @@ impl BenchClient {
         // Final done line carries the server's prompt/eval stats: prefill
         // throughput, TTFT, and the authoritative eval_count/eval_duration used
         // for the decode rate below.
-        let last_response: Option<GenerateResponse> =
-            last_done_line.as_deref().and_then(|l| serde_json::from_str(l).ok());
+        let last_response: Option<GenerateResponse> = last_done_line
+            .as_deref()
+            .and_then(|l| serde_json::from_str(l).ok());
         if let Some(ref body) = last_response {
             if let Some(err) = body.as_server_error() {
                 return Err(format!("server error: {}", err));
@@ -834,13 +892,14 @@ impl BenchClient {
         // is therefore scored by the same client-side rate. The server eval
         // fields are kept only as a fallback when the client span is unusable
         // (<2 tokens or zero span).
-        let completion_tok_s = steady_decode_tok_s(&token_times_ms)
-            .or_else(|| last_response.as_ref().and_then(|b| {
-                match (b.eval_count, b.eval_duration) {
+        let completion_tok_s = steady_decode_tok_s(&token_times_ms).or_else(|| {
+            last_response
+                .as_ref()
+                .and_then(|b| match (b.eval_count, b.eval_duration) {
                     (Some(c), Some(d)) if d > 0 => Some(c as f64 / (d as f64 / 1e9)),
                     _ => None,
-                }
-            }));
+                })
+        });
         let decode_ms_per_token = completion_tok_s.map(|t| 1000.0 / t);
 
         let ttft_ms = last_response
@@ -898,7 +957,8 @@ impl BenchClient {
     ) -> Result<IterationMetrics, String> {
         if images.is_some() {
             return Err("vLLM vision benchmarking via --vllm is not supported \
-                        (the bench uses the raw /v1/completions text path)".to_string());
+                        (the bench uses the raw /v1/completions text path)"
+                .to_string());
         }
         let url = format!("{}/v1/completions", self.base_url);
         let req = OpenAiCompletionRequest {
@@ -912,22 +972,35 @@ impl BenchClient {
         self.log_request("POST", &url, &req);
 
         let start = Instant::now();
-        let resp = self.http.post(&url).json(&req)
-            .timeout(Duration::from_secs(300)).send().await
+        let resp = self
+            .http
+            .post(&url)
+            .json(&req)
+            .timeout(Duration::from_secs(300))
+            .send()
+            .await
             .map_err(|e| format!("Completion request failed: {}", e))?;
         let wall_ms = start.elapsed().as_secs_f64() * 1000.0;
 
         self.log_response_status(&url, resp.status());
         if !resp.status().is_success() {
             let text = resp.text().await.unwrap_or_default();
-            if self.verbose { eprintln!("    <-- {}", text); }
+            if self.verbose {
+                eprintln!("    <-- {}", text);
+            }
             return Err(format!("Completion failed: {}", text));
         }
-        let body: OpenAiCompletionResponse = resp.json().await
+        let body: OpenAiCompletionResponse = resp
+            .json()
+            .await
             .map_err(|e| format!("Parse error: {}", e))?;
         self.log_response_body(&body);
 
-        let text = body.choices.first().map(|c| c.text.clone()).unwrap_or_default();
+        let text = body
+            .choices
+            .first()
+            .map(|c| c.text.clone())
+            .unwrap_or_default();
         let usage = body.usage.unwrap_or_default();
         let completion_tokens = usage.completion_tokens.unwrap_or(0);
         if completion_tokens == 0 && text.is_empty() {
@@ -937,7 +1010,9 @@ impl BenchClient {
         // is an upper bound on latency; streaming gives the clean number.
         let completion_tok_s = if wall_ms > 0.0 && completion_tokens > 0 {
             Some(completion_tokens as f64 / (wall_ms / 1000.0))
-        } else { None };
+        } else {
+            None
+        };
 
         Ok(IterationMetrics {
             wall_clock_ms: wall_ms,
@@ -952,7 +1027,7 @@ impl BenchClient {
             content_tokens: None,
             inter_token_latencies_ms: Vec::new(),
             response_preview: Some(truncate_preview(&text)),
-            first_token_wall_ms: None,  // non-streaming has no per-token timing
+            first_token_wall_ms: None, // non-streaming has no per-token timing
         })
     }
 
@@ -970,7 +1045,8 @@ impl BenchClient {
     ) -> Result<IterationMetrics, String> {
         if images.is_some() {
             return Err("vLLM vision benchmarking via --vllm is not supported \
-                        (the bench uses the raw /v1/completions text path)".to_string());
+                        (the bench uses the raw /v1/completions text path)"
+                .to_string());
         }
         let url = format!("{}/v1/completions", self.base_url);
         let req = OpenAiCompletionRequest {
@@ -984,14 +1060,21 @@ impl BenchClient {
         self.log_request("POST", &url, &req);
 
         let start = Instant::now();
-        let resp = self.http.post(&url).json(&req)
-            .timeout(Duration::from_secs(300)).send().await
+        let resp = self
+            .http
+            .post(&url)
+            .json(&req)
+            .timeout(Duration::from_secs(300))
+            .send()
+            .await
             .map_err(|e| format!("Stream request failed: {}", e))?;
 
         self.log_response_status(&url, resp.status());
         if !resp.status().is_success() {
             let text = resp.text().await.unwrap_or_default();
-            if self.verbose { eprintln!("    <-- {}", text); }
+            if self.verbose {
+                eprintln!("    <-- {}", text);
+            }
             return Err(format!("Stream failed: {}", text));
         }
 
@@ -1026,7 +1109,11 @@ impl BenchClient {
                 if let Some(u) = parsed.usage {
                     usage = Some(u); // final usage chunk
                 }
-                let delta = parsed.choices.first().map(|c| c.text.as_str()).unwrap_or("");
+                let delta = parsed
+                    .choices
+                    .first()
+                    .map(|c| c.text.as_str())
+                    .unwrap_or("");
                 if !delta.is_empty() {
                     if first_chunk_time.is_none() {
                         first_chunk_time = Some(start.elapsed().as_secs_f64() * 1000.0);
@@ -1044,7 +1131,8 @@ impl BenchClient {
         let inter_token_latencies_ms: Vec<f64> =
             token_times_ms.windows(2).map(|w| w[1] - w[0]).collect();
 
-        let completion_tokens = usage.as_ref()
+        let completion_tokens = usage
+            .as_ref()
             .and_then(|u| u.completion_tokens)
             .unwrap_or(token_count);
         if completion_tokens == 0 {

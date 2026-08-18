@@ -111,7 +111,9 @@ fn builtin_prompt(name: &str) -> Option<&'static str> {
 
 #[derive(Parser)]
 #[command(name = "llmbench")]
-#[command(about = "Inference server benchmark — compare Ollama vs LOKEN across models, contexts, and prompts")]
+#[command(
+    about = "Inference server benchmark — compare Ollama vs LOKEN across models, contexts, and prompts"
+)]
 #[command(version)]
 struct Args {
     /// Ollama server URL (e.g., http://host:11434)
@@ -371,7 +373,11 @@ fn looks_degenerate(text: &str) -> bool {
     for u in &units {
         *unit_counts.entry(*u).or_insert(0) += 1;
     }
-    unit_counts.values().max().map(|m| (*m as f64) / (units.len() as f64) > 0.40).unwrap_or(false)
+    unit_counts
+        .values()
+        .max()
+        .map(|m| (*m as f64) / (units.len() as f64) > 0.40)
+        .unwrap_or(false)
 }
 
 #[tokio::main]
@@ -421,7 +427,12 @@ async fn main() {
             match std::fs::read(path) {
                 Ok(bytes) => {
                     let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                    println!("  Image:      {} ({} bytes raw, {} bytes b64)", path, bytes.len(), encoded.len());
+                    println!(
+                        "  Image:      {} ({} bytes raw, {} bytes b64)",
+                        path,
+                        bytes.len(),
+                        encoded.len()
+                    );
                     // A vision run with no session id pays a cold prefill on every
                     // iteration: the image prefix is never reused across requests, so
                     // what gets measured is the first-token outlier rather than the
@@ -431,12 +442,14 @@ async fn main() {
                     // engines. So a stable id is defaulted when the caller gives none.
                     if args.session_id.is_none() {
                         args.session_id = Some("bench-vision-auto".to_string());
-                        eprintln!("\n  ℹ️  Vision bench: auto-set --session-id=bench-vision-auto\n  \
+                        eprintln!(
+                            "\n  ℹ️  Vision bench: auto-set --session-id=bench-vision-auto\n  \
                                        \x20  to enable image-prefix KV reuse across iters\n  \
                                        \x20  so the run reports the engines rather than the\n  \
                                        \x20  cache. Individual iterations may still stop\n  \
                                        \x20  early. Pass a different --session-id\n  \
-                                       \x20  to override or pass --session-id '' to disable.\n");
+                                       \x20  to override or pass --session-id '' to disable.\n"
+                        );
                     }
                     Some(vec![encoded])
                 }
@@ -452,25 +465,40 @@ async fn main() {
     // Build server targets
     let mut targets: Vec<ServerTarget> = Vec::new();
     if let Some(ref url) = args.ollama {
-        targets.push(ServerTarget { label: "Ollama".into(), url: normalize_url(url), protocol: Protocol::Ollama });
+        targets.push(ServerTarget {
+            label: "Ollama".into(),
+            url: normalize_url(url),
+            protocol: Protocol::Ollama,
+        });
     }
     if let Some(ref url) = args.loken {
-        targets.push(ServerTarget { label: "LOKEN".into(), url: normalize_url(url), protocol: Protocol::Ollama });
+        targets.push(ServerTarget {
+            label: "LOKEN".into(),
+            url: normalize_url(url),
+            protocol: Protocol::Ollama,
+        });
     }
     if let Some(ref url) = args.vllm {
-        targets.push(ServerTarget { label: "vLLM".into(), url: normalize_url(url), protocol: Protocol::OpenAI });
+        targets.push(ServerTarget {
+            label: "vLLM".into(),
+            url: normalize_url(url),
+            protocol: Protocol::OpenAI,
+        });
     }
 
     // vLLM reports no prefill/decode timing split — without --stream the decode
     // rate is wall-clock-inflated by prefill. Warn so a non-stream vLLM run
     // isn't misread as a loss.
     if !args.stream && targets.iter().any(|t| t.protocol == Protocol::OpenAI) {
-        eprintln!("\n  ⚠️  vLLM target without --stream: decode tok/s will include prefill time\n  \
+        eprintln!(
+            "\n  ⚠️  vLLM target without --stream: decode tok/s will include prefill time\n  \
                        \x20  (the OpenAI completions API gives no prefill/decode split).\n  \
-                       \x20  Pass --stream for a fair, length-invariant decode comparison.\n");
+                       \x20  Pass --stream for a fair, length-invariant decode comparison.\n"
+        );
     }
 
-    let clients: Vec<BenchClient> = targets.iter()
+    let clients: Vec<BenchClient> = targets
+        .iter()
         .map(|t| {
             let mut c = BenchClient::with_protocol(t.url.clone(), args.verbose, t.protocol);
             c.set_num_gpu(args.num_gpu);
@@ -483,16 +511,43 @@ async fn main() {
     println!();
     println!("  LLM Benchmark v{}", env!("CARGO_PKG_VERSION"));
     println!("  Models:     {}", args.models.join(", "));
-    println!("  num_ctx:    {}", args.num_ctx.iter().map(std::string::ToString::to_string).collect::<Vec<_>>().join(", "));
-    println!("  Prompts:    {}", prompt_specs.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", "));
+    println!(
+        "  num_ctx:    {}",
+        args.num_ctx
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    println!(
+        "  Prompts:    {}",
+        prompt_specs
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     println!("  Max tokens: {}", args.max_tokens);
-    println!("  Iterations: {} (+ {} warmup)", args.iterations, args.warmup);
+    println!(
+        "  Iterations: {} (+ {} warmup)",
+        args.iterations, args.warmup
+    );
     if args.concurrency > 1 {
         println!("  Concurrency: {} requests in flight", args.concurrency);
     }
     println!("  Streaming:  {}", if args.stream { "yes" } else { "no" });
-    println!("  GPU sample: {}", if args.no_gpu_sample { "off" } else { "on" });
-    println!("  Energy:     {}", if args.no_energy { "off".to_string() } else { format!("on (CI={} gCO2/kWh)", args.carbon_intensity) });
+    println!(
+        "  GPU sample: {}",
+        if args.no_gpu_sample { "off" } else { "on" }
+    );
+    println!(
+        "  Energy:     {}",
+        if args.no_energy {
+            "off".to_string()
+        } else {
+            format!("on (CI={} gCO2/kWh)", args.carbon_intensity)
+        }
+    );
     for t in &targets {
         println!("  {:<11} {}", format!("{}:", t.label), t.url);
     }
@@ -501,16 +556,32 @@ async fn main() {
     // Optional idle-energy baseline: sample energy with no request in flight so
     // the later report can separate active from idle draw. Done once, up front.
     let idle_energy: Option<EnergyWindow> = if !args.no_energy && args.idle_energy_secs > 0 {
-        println!("  Sampling idle energy baseline for {}s (no request)...", args.idle_energy_secs);
+        println!(
+            "  Sampling idle energy baseline for {}s (no request)...",
+            args.idle_energy_secs
+        );
         let s = EnergySampler::start(args.gpu_sample_interval_ms);
         tokio::time::sleep(Duration::from_secs(args.idle_energy_secs)).await;
         let w = s.stop(None).await;
-        let idle_w = if w.duration_s > 0.0 { w.energy_j / w.duration_s } else { 0.0 };
+        let idle_w = if w.duration_s > 0.0 {
+            w.energy_j / w.duration_s
+        } else {
+            0.0
+        };
         println!(
             "  Idle baseline: {:.2} J over {:.1}s = {:.1} W ({}){}",
-            w.energy_j, w.duration_s, idle_w,
-            if w.domains_counted.is_empty() { "no counters".to_string() } else { w.domains_counted.join("+") },
-            w.note.as_deref().map(|n| format!("  [{}]", n)).unwrap_or_default(),
+            w.energy_j,
+            w.duration_s,
+            idle_w,
+            if w.domains_counted.is_empty() {
+                "no counters".to_string()
+            } else {
+                w.domains_counted.join("+")
+            },
+            w.note
+                .as_deref()
+                .map(|n| format!("  [{}]", n))
+                .unwrap_or_default(),
         );
         Some(w)
     } else {
@@ -561,7 +632,11 @@ async fn main() {
                         loaded.push(m.clone());
                     }
                 }
-                print!("  [{}] Unloading {} loaded model(s)... ", other.label, loaded.len());
+                print!(
+                    "  [{}] Unloading {} loaded model(s)... ",
+                    other.label,
+                    loaded.len()
+                );
                 for m in &loaded {
                     match clients[j].unload_model(m).await {
                         Ok(()) => ok += 1,
@@ -584,10 +659,10 @@ async fn main() {
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     let used_mb = std::process::Command::new("nvidia-smi")
                         .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
-                        .output().ok()
+                        .output()
+                        .ok()
                         .and_then(|o| String::from_utf8(o.stdout).ok())
-                        .and_then(|s| s.lines().next()
-                            .and_then(|l| l.trim().parse::<u32>().ok()));
+                        .and_then(|s| s.lines().next().and_then(|l| l.trim().parse::<u32>().ok()));
                     if let Some(mb) = used_mb {
                         // < 2 GB: GPU0 is essentially idle (~hundreds of MB
                         // baseline used by drivers + the bench's own server).
@@ -596,7 +671,10 @@ async fn main() {
                             break;
                         }
                         if poll == 29 {
-                            println!("  [vram-wait] GPU0 still at {}MB after 30s — proceeding anyway", mb);
+                            println!(
+                                "  [vram-wait] GPU0 still at {}MB after 30s — proceeding anyway",
+                                mb
+                            );
                         }
                     } else {
                         break; // nvidia-smi not available — fall through
@@ -609,10 +687,19 @@ async fn main() {
             // vLLM has no load step (model resident at server launch); we only
             // confirm the server is reachable and serving this model.
             let load_time = if target.protocol == Protocol::OpenAI {
-                print!("  [{}] Checking vLLM server (model resident at launch)... ", target.label);
+                print!(
+                    "  [{}] Checking vLLM server (model resident at launch)... ",
+                    target.label
+                );
                 match clients[idx].load_model(model).await {
-                    Ok(_) => { println!("ready"); None }
-                    Err(e) => { println!("FAILED: {} (skipping)", e); continue; }
+                    Ok(_) => {
+                        println!("ready");
+                        None
+                    }
+                    Err(e) => {
+                        println!("FAILED: {} (skipping)", e);
+                        continue;
+                    }
                 }
             } else {
                 print!("  [{}] Loading model {}... ", target.label, model);
@@ -632,8 +719,10 @@ async fn main() {
             for &num_ctx in &args.num_ctx {
                 for (prompt_name, prompt_text) in &prompt_specs {
                     println!();
-                    println!("  ===== {} | model={} | num_ctx={} | prompt={} =====",
-                        target.label, model, num_ctx, prompt_name);
+                    println!(
+                        "  ===== {} | model={} | num_ctx={} | prompt={} =====",
+                        target.label, model, num_ctx, prompt_name
+                    );
 
                     let cell = run_cell(
                         &clients[idx],
@@ -657,7 +746,8 @@ async fn main() {
                         image_b64.as_deref(),
                         &args.require_substr,
                         args.session_id.as_deref(),
-                    ).await;
+                    )
+                    .await;
                     all_cells.push(cell);
                 }
             }
@@ -667,7 +757,9 @@ async fn main() {
     // Final cleanup
     for (j, target) in targets.iter().enumerate() {
         for model in &args.models {
-            if failed_models.contains(&(j, model.clone())) { continue; }
+            if failed_models.contains(&(j, model.clone())) {
+                continue;
+            }
             let _ = clients[j].unload_model(model).await;
         }
         let _ = target;
@@ -677,7 +769,10 @@ async fn main() {
     for cell in &all_cells {
         stats::print_table(
             &format!("{} ({})", cell.target.label, cell.target.url),
-            &format!("{} | num_ctx={} | prompt={}", cell.model, cell.num_ctx, cell.prompt_name),
+            &format!(
+                "{} | num_ctx={} | prompt={}",
+                cell.model, cell.num_ctx, cell.prompt_name
+            ),
             cell.prompt_chars,
             args.max_tokens,
             cell.iterations.len(),
@@ -689,7 +784,10 @@ async fn main() {
             }
         }
         if let Some(pass) = cell.coherence_pass {
-            println!("  Coherence gate:    {}", if pass { "PASS" } else { "FAIL" });
+            println!(
+                "  Coherence gate:    {}",
+                if pass { "PASS" } else { "FAIL" }
+            );
         }
         // GPU summary (if any sampler ran)
         print_gpu_summary(&cell.gpu_samples_per_iter);
@@ -724,20 +822,32 @@ fn compare_to_baseline(path: &str, cells: &[CellResult]) {
     println!("=== Baseline comparison vs {} ===", path);
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
-        Err(e) => { eprintln!("  Could not read baseline: {}", e); return; }
+        Err(e) => {
+            eprintln!("  Could not read baseline: {}", e);
+            return;
+        }
     };
     let baseline: serde_json::Value = match serde_json::from_str(&text) {
         Ok(v) => v,
-        Err(e) => { eprintln!("  Could not parse baseline JSON: {}", e); return; }
+        Err(e) => {
+            eprintln!("  Could not parse baseline JSON: {}", e);
+            return;
+        }
     };
     let results = match baseline.get("results").and_then(|v| v.as_array()) {
         Some(r) => r,
-        None => { eprintln!("  Baseline missing 'results' array"); return; }
+        None => {
+            eprintln!("  Baseline missing 'results' array");
+            return;
+        }
     };
     let mut drift_warned = false;
     for c in cells {
         // Find matching cell in baseline
-        let cell_key = format!("{}|{}|{}|{}", c.target.label, c.model, c.num_ctx, c.prompt_name);
+        let cell_key = format!(
+            "{}|{}|{}|{}",
+            c.target.label, c.model, c.num_ctx, c.prompt_name
+        );
         let matched = results.iter().find(|b| {
             let target = b.get("target").and_then(|v| v.as_str()).unwrap_or("");
             let model = b.get("model").and_then(|v| v.as_str()).unwrap_or("");
@@ -747,27 +857,57 @@ fn compare_to_baseline(path: &str, cells: &[CellResult]) {
         });
         let m = match matched {
             Some(m) => m,
-            None => { println!("  [{}] NO BASELINE — skipping", cell_key); continue; }
+            None => {
+                println!("  [{}] NO BASELINE — skipping", cell_key);
+                continue;
+            }
         };
         // Fingerprint check
-        let cur_fp = c.model_fingerprint.as_ref().map(|(m, _, _)| m.as_str()).unwrap_or("?");
-        let base_fp = m.pointer("/model_fingerprint/modified_at").and_then(|v| v.as_str()).unwrap_or("?");
+        let cur_fp = c
+            .model_fingerprint
+            .as_ref()
+            .map(|(m, _, _)| m.as_str())
+            .unwrap_or("?");
+        let base_fp = m
+            .pointer("/model_fingerprint/modified_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
         let drift = cur_fp != base_fp;
         if drift {
             drift_warned = true;
-            println!("  ⚠️  [{}] DRIFT: model modified_at differs (baseline={}, current={})", cell_key, base_fp, cur_fp);
+            println!(
+                "  ⚠️  [{}] DRIFT: model modified_at differs (baseline={}, current={})",
+                cell_key, base_fp, cur_fp
+            );
         }
         // Completion tok/s delta (find stat named "Completion tok/s")
-        let cur_tok_s = c.stats.iter().find(|s| s.label == "Completion tok/s").map(|s| s.mean);
+        let cur_tok_s = c
+            .stats
+            .iter()
+            .find(|s| s.label == "Completion tok/s")
+            .map(|s| s.mean);
         // JSON pointer per RFC 6901: '/' inside key is escaped as ~1
-        let base_tok_s = m.pointer("/stats/Completion tok~1s/mean").and_then(|v| v.as_f64());
+        let base_tok_s = m
+            .pointer("/stats/Completion tok~1s/mean")
+            .and_then(|v| v.as_f64());
         match (cur_tok_s, base_tok_s) {
             (Some(cur), Some(base)) => {
                 let delta_pct = ((cur - base) / base) * 100.0;
-                let arrow = if delta_pct > 1.0 { "↑" } else if delta_pct < -1.0 { "↓" } else { "=" };
+                let arrow = if delta_pct > 1.0 {
+                    "↑"
+                } else if delta_pct < -1.0 {
+                    "↓"
+                } else {
+                    "="
+                };
                 println!(
                     "  {} [{}] {} {:.1} → {:.1} tok/s  ({:+.1}%)",
-                    arrow, cell_key, if drift { "(DRIFT)" } else { "" }, base, cur, delta_pct,
+                    arrow,
+                    cell_key,
+                    if drift { "(DRIFT)" } else { "" },
+                    base,
+                    cur,
+                    delta_pct,
                 );
             }
             _ => println!("  ? [{}] stats unavailable for delta", cell_key),
@@ -821,13 +961,20 @@ async fn run_cell<'a>(
         let mut recovered = false;
         for i in 0..warmup {
             let result = if stream {
-                client.generate_stream(model, prompt, max_tokens, Some(num_ctx), images, session_id).await
+                client
+                    .generate_stream(model, prompt, max_tokens, Some(num_ctx), images, session_id)
+                    .await
             } else {
-                client.generate(model, prompt, max_tokens, Some(num_ctx), images, session_id).await
+                client
+                    .generate(model, prompt, max_tokens, Some(num_ctx), images, session_id)
+                    .await
             };
             match result {
                 Ok(m) => {
-                    let tok_s = m.completion_tok_s.map(|t| format!("{:.1}", t)).unwrap_or_default();
+                    let tok_s = m
+                        .completion_tok_s
+                        .map(|t| format!("{:.1}", t))
+                        .unwrap_or_default();
                     print!("#{} {} tok/s ", i + 1, tok_s);
                     consec_failures = 0;
                 }
@@ -850,7 +997,10 @@ async fn run_cell<'a>(
     }
 
     // Benchmark iterations
-    println!("  [{}] Running {} {} iterations...", target.label, iterations, mode);
+    println!(
+        "  [{}] Running {} {} iterations...",
+        target.label, iterations, mode
+    );
     let mut all_metrics: Vec<IterationMetrics> = Vec::new();
     let mut all_gpu_samples: Vec<Vec<GpuSample>> = Vec::new();
     let mut all_host_samples: Vec<Option<HostSample>> = Vec::new();
@@ -879,9 +1029,13 @@ async fn run_cell<'a>(
             let t0 = std::time::Instant::now();
             let results = futures::future::join_all(prompts.iter().map(|p| async move {
                 if stream {
-                    client.generate_stream(model, p, max_tokens, Some(num_ctx), images, session_id).await
+                    client
+                        .generate_stream(model, p, max_tokens, Some(num_ctx), images, session_id)
+                        .await
                 } else {
-                    client.generate(model, p, max_tokens, Some(num_ctx), images, session_id).await
+                    client
+                        .generate(model, p, max_tokens, Some(num_ctx), images, session_id)
+                        .await
                 }
             }))
             .await;
@@ -906,7 +1060,13 @@ async fn run_cell<'a>(
             }
             println!(
                 "    [{}] flight {}/{}: {}/{} served, {} tokens in {:.2}s -> {:.1} tok/s aggregate",
-                target.label, f + 1, flights, served, n, tokens, wall_s,
+                target.label,
+                f + 1,
+                flights,
+                served,
+                n,
+                tokens,
+                wall_s,
                 tokens as f64 / wall_s.max(1e-9)
             );
         }
@@ -932,17 +1092,29 @@ async fn run_cell<'a>(
         let prompt = iter_prompt.as_str();
 
         // Start GPU sampler before request, stop after
-        let sampler = if gpu_sample { Some(GpuSampler::start(gpu_interval_ms)) } else { None };
+        let sampler = if gpu_sample {
+            Some(GpuSampler::start(gpu_interval_ms))
+        } else {
+            None
+        };
         // Host footprint of the engine processes (RSS/swap/CPU via /proc).
         let host_sampler = HostSampler::start(gpu_interval_ms.max(200), &["server", "ollama"]);
         // Energy/carbon window (NVML energy counter + RAPL). Spans the whole
         // request including prefill; per-token energy uses tokens_generated.
-        let energy_sampler = if energy_measure { Some(EnergySampler::start(gpu_interval_ms)) } else { None };
+        let energy_sampler = if energy_measure {
+            Some(EnergySampler::start(gpu_interval_ms))
+        } else {
+            None
+        };
 
         let result = if stream {
-            client.generate_stream(model, prompt, max_tokens, Some(num_ctx), images, session_id).await
+            client
+                .generate_stream(model, prompt, max_tokens, Some(num_ctx), images, session_id)
+                .await
         } else {
-            client.generate(model, prompt, max_tokens, Some(num_ctx), images, session_id).await
+            client
+                .generate(model, prompt, max_tokens, Some(num_ctx), images, session_id)
+                .await
         };
 
         // Prefill→decode boundary (first-token wall time) so the energy sampler
@@ -956,23 +1128,40 @@ async fn run_cell<'a>(
             Some(s) => Some(s.stop(decode_start_s).await),
             None => None,
         };
-        let gpu_summary = if let Some(s) = sampler { s.stop().await } else { Vec::new() };
+        let gpu_summary = if let Some(s) = sampler {
+            s.stop().await
+        } else {
+            Vec::new()
+        };
         let host_summary = host_sampler.stop().await;
 
         match result {
             Ok(metrics) => {
-                let tok_s = metrics.completion_tok_s.map(|t| format!("{:.1}", t)).unwrap_or("?".into());
-                let ttft = metrics.ttft_ms.map(|t| format!("{:.0}ms", t)).unwrap_or("?".into());
+                let tok_s = metrics
+                    .completion_tok_s
+                    .map(|t| format!("{:.1}", t))
+                    .unwrap_or("?".into());
+                let ttft = metrics
+                    .ttft_ms
+                    .map(|t| format!("{:.0}ms", t))
+                    .unwrap_or("?".into());
                 let tokens = metrics.tokens_generated.unwrap_or(0);
                 // Show content tokens alongside total when they differ (template-leak warning).
                 let tokens_str = match metrics.content_tokens {
-                    Some(c) if c != tokens => format!("{}={}+{}tpl", tokens, c, tokens.saturating_sub(c)),
+                    Some(c) if c != tokens => {
+                        format!("{}={}+{}tpl", tokens, c, tokens.saturating_sub(c))
+                    }
                     _ => format!("{}", tokens),
                 };
                 let itl_str = format_itl_summary(&metrics.inter_token_latencies_ms);
                 println!(
                     "    #{}: {} tok/s, TTFT {}, {} tokens, ITL[{}], {:.0}ms total",
-                    i + 1, tok_s, ttft, tokens_str, itl_str, metrics.e2e_latency_ms
+                    i + 1,
+                    tok_s,
+                    ttft,
+                    tokens_str,
+                    itl_str,
+                    metrics.e2e_latency_ms
                 );
                 if let Some(preview) = metrics.response_preview.as_deref() {
                     if !preview.is_empty() {
@@ -983,11 +1172,23 @@ async fn run_cell<'a>(
                 if let Some(ew) = energy_window.as_ref() {
                     let toks = metrics.tokens_generated.unwrap_or(0);
                     let jpt = ew.j_per_tok(toks);
-                    let dom = if ew.domains_counted.is_empty() { "none".to_string() } else { ew.domains_counted.join("+") };
+                    let dom = if ew.domains_counted.is_empty() {
+                        "none".to_string()
+                    } else {
+                        ew.domains_counted.join("+")
+                    };
                     match jpt {
                         Some(j) => {
-                            let gpt = if toks > 0 { ew.gpu_energy_j / toks as f64 } else { 0.0 };
-                            let cpt = if toks > 0 { ew.cpu_pkg_energy_j / toks as f64 } else { 0.0 };
+                            let gpt = if toks > 0 {
+                                ew.gpu_energy_j / toks as f64
+                            } else {
+                                0.0
+                            };
+                            let cpt = if toks > 0 {
+                                ew.cpu_pkg_energy_j / toks as f64
+                            } else {
+                                0.0
+                            };
                             // Decode-phase (prefill-excluded) J/tok — the honest
                             // cross-engine metric (immune to the prompt-cache confound).
                             let dec = ew.j_per_decode_tok(toks);
@@ -1001,8 +1202,10 @@ async fn run_cell<'a>(
                                 ew.gco2_per_tok(toks, carbon_intensity).unwrap_or(0.0)
                             );
                         }
-                        None => println!("        energy: counters unavailable ({})",
-                            ew.note.as_deref().unwrap_or("none")),
+                        None => println!(
+                            "        energy: counters unavailable ({})",
+                            ew.note.as_deref().unwrap_or("none")
+                        ),
                     }
                 }
                 all_metrics.push(metrics);
@@ -1056,52 +1259,115 @@ async fn run_cell<'a>(
     } else if missing_substr {
         println!("    [coherence] FAIL — an iteration contained none of the required substrings");
     } else if coherence_pass == Some(true) {
-        println!("    [coherence] PASS ({} iter{})", all_metrics.len(),
-            if needles.is_empty() { String::new() } else { format!(", {} substring gate", needles.len()) });
+        println!(
+            "    [coherence] PASS ({} iter{})",
+            all_metrics.len(),
+            if needles.is_empty() {
+                String::new()
+            } else {
+                format!(", {} substring gate", needles.len())
+            }
+        );
     }
 
     // Compute stats
     let mut stats = Vec::new();
     if let Some(load) = load_time_ms {
-        if let Some(s) = Stats::compute("Model load", "ms", &[load]) { stats.push(s); }
+        if let Some(s) = Stats::compute("Model load", "ms", &[load]) {
+            stats.push(s);
+        }
     }
     let ttft: Vec<f64> = all_metrics.iter().filter_map(|m| m.ttft_ms).collect();
-    if let Some(s) = Stats::compute("TTFT", "ms", &ttft) { stats.push(s); }
+    if let Some(s) = Stats::compute("TTFT", "ms", &ttft) {
+        stats.push(s);
+    }
     let prompt_tps: Vec<f64> = all_metrics.iter().filter_map(|m| m.prompt_tok_s).collect();
-    if let Some(s) = Stats::compute("Prompt tok/s", "tok/s", &prompt_tps) { stats.push(s); }
-    let comp_tps: Vec<f64> = all_metrics.iter().filter_map(|m| m.completion_tok_s).collect();
-    if let Some(s) = Stats::compute("Completion tok/s", "tok/s", &comp_tps) { stats.push(s); }
+    if let Some(s) = Stats::compute("Prompt tok/s", "tok/s", &prompt_tps) {
+        stats.push(s);
+    }
+    let comp_tps: Vec<f64> = all_metrics
+        .iter()
+        .filter_map(|m| m.completion_tok_s)
+        .collect();
+    if let Some(s) = Stats::compute("Completion tok/s", "tok/s", &comp_tps) {
+        stats.push(s);
+    }
     // Length-invariant decode rate — fair comparison when servers have
     // different EOS handling (chat-tuned models). See
     // project_bench_apples_oranges_2026_05_26.md.
-    let decode_ms: Vec<f64> = all_metrics.iter().filter_map(|m| m.decode_ms_per_token).collect();
-    if let Some(s) = Stats::compute("Decode ms/tok", "ms", &decode_ms) { stats.push(s); }
+    let decode_ms: Vec<f64> = all_metrics
+        .iter()
+        .filter_map(|m| m.decode_ms_per_token)
+        .collect();
+    if let Some(s) = Stats::compute("Decode ms/tok", "ms", &decode_ms) {
+        stats.push(s);
+    }
     let e2e: Vec<f64> = all_metrics.iter().map(|m| m.e2e_latency_ms).collect();
-    if let Some(s) = Stats::compute("E2E latency", "ms", &e2e) { stats.push(s); }
-    let tokens: Vec<f64> = all_metrics.iter().filter_map(|m| m.tokens_generated.map(|t| t as f64)).collect();
-    if let Some(s) = Stats::compute("Tokens generated", "count", &tokens) { stats.push(s); }
+    if let Some(s) = Stats::compute("E2E latency", "ms", &e2e) {
+        stats.push(s);
+    }
+    let tokens: Vec<f64> = all_metrics
+        .iter()
+        .filter_map(|m| m.tokens_generated.map(|t| t as f64))
+        .collect();
+    if let Some(s) = Stats::compute("Tokens generated", "count", &tokens) {
+        stats.push(s);
+    }
     // ITL stats: aggregate every inter-token gap from every iteration into one population
-    let all_itl: Vec<f64> = all_metrics.iter().flat_map(|m| m.inter_token_latencies_ms.iter().copied()).collect();
-    if let Some(s) = Stats::compute("ITL (per token)", "ms", &all_itl) { stats.push(s); }
+    let all_itl: Vec<f64> = all_metrics
+        .iter()
+        .flat_map(|m| m.inter_token_latencies_ms.iter().copied())
+        .collect();
+    if let Some(s) = Stats::compute("ITL (per token)", "ms", &all_itl) {
+        stats.push(s);
+    }
     // Energy metrics. Pair each iteration's energy window with its token count
     // (windows align 1:1 with all_metrics — both pushed in the same Ok arm).
-    let j_per_tok: Vec<f64> = all_metrics.iter().zip(all_energy.iter())
-        .filter_map(|(m, e)| e.as_ref().and_then(|w| w.j_per_tok(m.tokens_generated.unwrap_or(0))))
+    let j_per_tok: Vec<f64> = all_metrics
+        .iter()
+        .zip(all_energy.iter())
+        .filter_map(|(m, e)| {
+            e.as_ref()
+                .and_then(|w| w.j_per_tok(m.tokens_generated.unwrap_or(0)))
+        })
         .collect();
-    if let Some(s) = Stats::compute("Energy J/tok", "J", &j_per_tok) { stats.push(s); }
+    if let Some(s) = Stats::compute("Energy J/tok", "J", &j_per_tok) {
+        stats.push(s);
+    }
     // Decode-phase J/tok (prefill excluded) — the honest cross-engine energy metric.
-    let j_per_decode_tok: Vec<f64> = all_metrics.iter().zip(all_energy.iter())
-        .filter_map(|(m, e)| e.as_ref().and_then(|w| w.j_per_decode_tok(m.tokens_generated.unwrap_or(0))))
+    let j_per_decode_tok: Vec<f64> = all_metrics
+        .iter()
+        .zip(all_energy.iter())
+        .filter_map(|(m, e)| {
+            e.as_ref()
+                .and_then(|w| w.j_per_decode_tok(m.tokens_generated.unwrap_or(0)))
+        })
         .collect();
-    if let Some(s) = Stats::compute("Energy decode J/tok", "J", &j_per_decode_tok) { stats.push(s); }
-    let wh_per_tok: Vec<f64> = all_metrics.iter().zip(all_energy.iter())
-        .filter_map(|(m, e)| e.as_ref().and_then(|w| w.wh_per_tok(m.tokens_generated.unwrap_or(0))))
+    if let Some(s) = Stats::compute("Energy decode J/tok", "J", &j_per_decode_tok) {
+        stats.push(s);
+    }
+    let wh_per_tok: Vec<f64> = all_metrics
+        .iter()
+        .zip(all_energy.iter())
+        .filter_map(|(m, e)| {
+            e.as_ref()
+                .and_then(|w| w.wh_per_tok(m.tokens_generated.unwrap_or(0)))
+        })
         .collect();
-    if let Some(s) = Stats::compute("Energy Wh/tok", "Wh", &wh_per_tok) { stats.push(s); }
-    let gco2_per_tok: Vec<f64> = all_metrics.iter().zip(all_energy.iter())
-        .filter_map(|(m, e)| e.as_ref().and_then(|w| w.gco2_per_tok(m.tokens_generated.unwrap_or(0), carbon_intensity)))
+    if let Some(s) = Stats::compute("Energy Wh/tok", "Wh", &wh_per_tok) {
+        stats.push(s);
+    }
+    let gco2_per_tok: Vec<f64> = all_metrics
+        .iter()
+        .zip(all_energy.iter())
+        .filter_map(|(m, e)| {
+            e.as_ref()
+                .and_then(|w| w.gco2_per_tok(m.tokens_generated.unwrap_or(0), carbon_intensity))
+        })
         .collect();
-    if let Some(s) = Stats::compute("Carbon gCO2/tok", "g", &gco2_per_tok) { stats.push(s); }
+    if let Some(s) = Stats::compute("Carbon gCO2/tok", "g", &gco2_per_tok) {
+        stats.push(s);
+    }
 
     let first_response_preview = all_metrics
         .iter()
@@ -1110,8 +1376,10 @@ async fn run_cell<'a>(
     // Capture model fingerprint so JSON output is cross-session attributable.
     let model_fingerprint = client.model_fingerprint(model).await;
     if let Some((mod_at, params, quant)) = model_fingerprint.as_ref() {
-        println!("  [{}] Model fingerprint: modified_at={} params={} quant={}",
-                 target.label, mod_at, params, quant);
+        println!(
+            "  [{}] Model fingerprint: modified_at={} params={} quant={}",
+            target.label, mod_at, params, quant
+        );
     }
 
     CellResult {
@@ -1168,7 +1436,9 @@ fn print_gpu_summary(samples_per_iter: &[Vec<GpuSample>]) {
     let mut by_idx: BTreeMap<u32, (String, Vec<&GpuSample>)> = BTreeMap::new();
     for iter_samples in samples_per_iter {
         for s in iter_samples {
-            let entry = by_idx.entry(s.gpu_index).or_insert_with(|| (s.gpu_name.clone(), Vec::new()));
+            let entry = by_idx
+                .entry(s.gpu_index)
+                .or_insert_with(|| (s.gpu_name.clone(), Vec::new()));
             entry.1.push(s);
         }
     }
@@ -1176,24 +1446,36 @@ fn print_gpu_summary(samples_per_iter: &[Vec<GpuSample>]) {
         return;
     }
     println!("  GPU usage during this cell:");
-    println!("  {:<6} {:<28} {:>12} {:>12} {:>10} {:>10}", "GPU", "Name", "VRAM peak", "VRAM avg", "Util pk", "Power pk");
+    println!(
+        "  {:<6} {:<28} {:>12} {:>12} {:>10} {:>10}",
+        "GPU", "Name", "VRAM peak", "VRAM avg", "Util pk", "Power pk"
+    );
     for (idx, (name, samples)) in &by_idx {
         let vram_peak = samples.iter().map(|s| s.vram_peak_mb).max().unwrap_or(0);
         let vram_avg = if !samples.is_empty() {
             samples.iter().map(|s| s.vram_avg_mb).sum::<u64>() / samples.len() as u64
-        } else { 0 };
+        } else {
+            0
+        };
         let util_peak = samples.iter().map(|s| s.util_peak_pct).max().unwrap_or(0);
-        let power_peak = samples.iter().map(|s| s.power_peak_w).fold(0.0_f64, f64::max);
+        let power_peak = samples
+            .iter()
+            .map(|s| s.power_peak_w)
+            .fold(0.0_f64, f64::max);
         let short_name: String = name.chars().take(28).collect();
-        println!("  {:<6} {:<28} {:>10}MB {:>10}MB {:>9}% {:>8.0}W",
-            idx, short_name, vram_peak, vram_avg, util_peak, power_peak);
+        println!(
+            "  {:<6} {:<28} {:>10}MB {:>10}MB {:>9}% {:>8.0}W",
+            idx, short_name, vram_peak, vram_avg, util_peak, power_peak
+        );
     }
     println!();
 }
 
 /// Side-by-side comparison across two targets, one block per (model, num_ctx, prompt).
 fn print_sweep_comparison(cells: &[CellResult], targets: &[ServerTarget]) {
-    if targets.len() != 2 { return; }
+    if targets.len() != 2 {
+        return;
+    }
     // Group cells by (model, num_ctx, prompt)
     let mut groups: BTreeMap<(String, usize, String), Vec<&CellResult>> = BTreeMap::new();
     for cell in cells {
@@ -1203,7 +1485,10 @@ fn print_sweep_comparison(cells: &[CellResult], targets: &[ServerTarget]) {
 
     println!();
     println!("  ╔══════════════════════════════════════════════════════════════════════╗");
-    println!("  ║ SWEEP COMPARISON ({} vs {})", targets[0].label, targets[1].label);
+    println!(
+        "  ║ SWEEP COMPARISON ({} vs {})",
+        targets[0].label, targets[1].label
+    );
     println!("  ╚══════════════════════════════════════════════════════════════════════╝");
 
     for ((model, num_ctx, prompt), group) in &groups {
@@ -1211,7 +1496,10 @@ fn print_sweep_comparison(cells: &[CellResult], targets: &[ServerTarget]) {
         let cell_b = group.iter().find(|c| c.target.label == targets[1].label);
         if let (Some(a), Some(b)) = (cell_a, cell_b) {
             println!();
-            println!("  --- model={} | num_ctx={} | prompt={} ---", model, num_ctx, prompt);
+            println!(
+                "  --- model={} | num_ctx={} | prompt={} ---",
+                model, num_ctx, prompt
+            );
             stats::print_comparison(&a.target.label, &a.stats, &b.target.label, &b.stats);
         }
     }
@@ -1220,86 +1508,101 @@ fn print_sweep_comparison(cells: &[CellResult], targets: &[ServerTarget]) {
 // JSON output -----------------------------------------------------------------
 
 fn save_json(path: &str, args: &Args, cells: &[CellResult], idle_energy: Option<&EnergyWindow>) {
-    let results: Vec<serde_json::Value> = cells.iter().map(|c| {
-        let stats_map: serde_json::Map<String, serde_json::Value> = c.stats.iter().map(|s| {
-            (s.label.clone(), serde_json::json!({
-                "mean": s.mean,
-                "stddev": s.stddev,
-                "min": s.min,
-                "max": s.max,
-                "p50": s.p50,
-                "p95": s.p95,
-                "unit": s.unit,
-                "count": s.count,
-            }))
-        }).collect();
-
-        let iterations_json: Vec<serde_json::Value> = c.iterations.iter().enumerate().map(|(i, m)| {
-            let gpu = c.gpu_samples_per_iter.get(i).cloned().unwrap_or_default();
-            let host = c.host_samples_per_iter.get(i).cloned().flatten();
-            // Energy: derive per-token metrics from the window + this iter's tokens.
-            let energy = c.energy_per_iter.get(i).and_then(|e| e.as_ref()).map(|w| {
-                let toks = m.tokens_generated.unwrap_or(0);
-                serde_json::json!({
-                    "energy_j": w.energy_j,
-                    "gpu_energy_j": w.gpu_energy_j,
-                    "cpu_pkg_energy_j": w.cpu_pkg_energy_j,
-                    "dram_energy_j": w.dram_energy_j,
-                    "duration_s": w.duration_s,
-                    "j_per_tok": w.j_per_tok(toks),
-                    "wh_per_tok": w.wh_per_tok(toks),
-                    "gco2_per_tok": w.gco2_per_tok(toks, c.carbon_intensity),
-                    "carbon_intensity_gco2_per_kwh": c.carbon_intensity,
-                    "gpu_path": w.gpu_path,
-                    "domains_counted": w.domains_counted,
-                    "cpu_rapl_available": w.cpu_rapl_available,
-                    "dram_rapl_available": w.dram_rapl_available,
-                    "note": w.note,
-                    // Decode-phase (prefill-excluded) — the cache-confound-free metric.
-                    "gpu_decode_j": w.gpu_decode_j,
-                    "cpu_pkg_decode_j": w.cpu_pkg_decode_j,
-                    "dram_decode_j": w.dram_decode_j,
-                    "decode_energy_j": w.decode_energy_j,
-                    "decode_duration_s": w.decode_duration_s,
-                    "j_per_decode_tok": w.j_per_decode_tok(toks),
+    let results: Vec<serde_json::Value> = cells
+        .iter()
+        .map(|c| {
+            let stats_map: serde_json::Map<String, serde_json::Value> = c
+                .stats
+                .iter()
+                .map(|s| {
+                    (
+                        s.label.clone(),
+                        serde_json::json!({
+                            "mean": s.mean,
+                            "stddev": s.stddev,
+                            "min": s.min,
+                            "max": s.max,
+                            "p50": s.p50,
+                            "p95": s.p95,
+                            "unit": s.unit,
+                            "count": s.count,
+                        }),
+                    )
                 })
-            });
-            serde_json::json!({
-                "iteration": i + 1,
-                "wall_clock_ms": m.wall_clock_ms,
-                "load_time_ms": m.load_time_ms,
-                "ttft_ms": m.ttft_ms,
-                "prompt_tokens": m.prompt_tokens,
-                "prompt_tok_s": m.prompt_tok_s,
-                "completion_tok_s": m.completion_tok_s,
-                "e2e_latency_ms": m.e2e_latency_ms,
-                "tokens_generated": m.tokens_generated,
-                "inter_token_latencies_ms": m.inter_token_latencies_ms,
-                "response_preview": m.response_preview,
-                "gpu_samples": gpu,
-                "host_sample": host,
-                "energy": energy,
-            })
-        }).collect();
+                .collect();
 
-        let fp = c.model_fingerprint.as_ref().map(|(m, p, q)| {
+            let iterations_json: Vec<serde_json::Value> = c
+                .iterations
+                .iter()
+                .enumerate()
+                .map(|(i, m)| {
+                    let gpu = c.gpu_samples_per_iter.get(i).cloned().unwrap_or_default();
+                    let host = c.host_samples_per_iter.get(i).cloned().flatten();
+                    // Energy: derive per-token metrics from the window + this iter's tokens.
+                    let energy = c.energy_per_iter.get(i).and_then(|e| e.as_ref()).map(|w| {
+                        let toks = m.tokens_generated.unwrap_or(0);
+                        serde_json::json!({
+                            "energy_j": w.energy_j,
+                            "gpu_energy_j": w.gpu_energy_j,
+                            "cpu_pkg_energy_j": w.cpu_pkg_energy_j,
+                            "dram_energy_j": w.dram_energy_j,
+                            "duration_s": w.duration_s,
+                            "j_per_tok": w.j_per_tok(toks),
+                            "wh_per_tok": w.wh_per_tok(toks),
+                            "gco2_per_tok": w.gco2_per_tok(toks, c.carbon_intensity),
+                            "carbon_intensity_gco2_per_kwh": c.carbon_intensity,
+                            "gpu_path": w.gpu_path,
+                            "domains_counted": w.domains_counted,
+                            "cpu_rapl_available": w.cpu_rapl_available,
+                            "dram_rapl_available": w.dram_rapl_available,
+                            "note": w.note,
+                            // Decode-phase (prefill-excluded) — the cache-confound-free metric.
+                            "gpu_decode_j": w.gpu_decode_j,
+                            "cpu_pkg_decode_j": w.cpu_pkg_decode_j,
+                            "dram_decode_j": w.dram_decode_j,
+                            "decode_energy_j": w.decode_energy_j,
+                            "decode_duration_s": w.decode_duration_s,
+                            "j_per_decode_tok": w.j_per_decode_tok(toks),
+                        })
+                    });
+                    serde_json::json!({
+                        "iteration": i + 1,
+                        "wall_clock_ms": m.wall_clock_ms,
+                        "load_time_ms": m.load_time_ms,
+                        "ttft_ms": m.ttft_ms,
+                        "prompt_tokens": m.prompt_tokens,
+                        "prompt_tok_s": m.prompt_tok_s,
+                        "completion_tok_s": m.completion_tok_s,
+                        "e2e_latency_ms": m.e2e_latency_ms,
+                        "tokens_generated": m.tokens_generated,
+                        "inter_token_latencies_ms": m.inter_token_latencies_ms,
+                        "response_preview": m.response_preview,
+                        "gpu_samples": gpu,
+                        "host_sample": host,
+                        "energy": energy,
+                    })
+                })
+                .collect();
+
+            let fp = c.model_fingerprint.as_ref().map(|(m, p, q)| {
             serde_json::json!({"modified_at": m, "parameter_size": p, "quantization_level": q})
         });
-        serde_json::json!({
-            "target": c.target.label,
-            "url": c.target.url,
-            "model": c.model,
-            "model_fingerprint": fp,
-            "num_ctx": c.num_ctx,
-            "prompt": c.prompt_name,
-            "prompt_chars": c.prompt_chars,
-            "load_time_ms": c.load_time_ms,
-            "first_response_preview": c.first_response_preview,
-            "coherence_pass": c.coherence_pass,
-            "stats": serde_json::Value::Object(stats_map),
-            "iterations": iterations_json,
+            serde_json::json!({
+                "target": c.target.label,
+                "url": c.target.url,
+                "model": c.model,
+                "model_fingerprint": fp,
+                "num_ctx": c.num_ctx,
+                "prompt": c.prompt_name,
+                "prompt_chars": c.prompt_chars,
+                "load_time_ms": c.load_time_ms,
+                "first_response_preview": c.first_response_preview,
+                "coherence_pass": c.coherence_pass,
+                "stats": serde_json::Value::Object(stats_map),
+                "iterations": iterations_json,
+            })
         })
-    }).collect();
+        .collect();
 
     let payload = serde_json::json!({
         "timestamp": chrono::Utc::now().to_rfc3339(),
@@ -1342,11 +1645,12 @@ fn save_csv(path: &str, cells: &[CellResult]) {
     out.push_str("target,model,num_ctx,prompt,iteration,wall_clock_ms,ttft_ms,prompt_tok_s,completion_tok_s,e2e_latency_ms,tokens_generated,itl_count,itl_p50_ms,itl_p95_ms\n");
     for c in cells {
         for (i, m) in c.iterations.iter().enumerate() {
-            let (itl_p50, itl_p95) = if let Some(s) = Stats::compute("itl", "ms", &m.inter_token_latencies_ms) {
-                (format!("{:.3}", s.p50), format!("{:.3}", s.p95))
-            } else {
-                (String::new(), String::new())
-            };
+            let (itl_p50, itl_p95) =
+                if let Some(s) = Stats::compute("itl", "ms", &m.inter_token_latencies_ms) {
+                    (format!("{:.3}", s.p50), format!("{:.3}", s.p95))
+                } else {
+                    (String::new(), String::new())
+                };
             out.push_str(&format!(
                 "{},{},{},{},{},{:.3},{},{},{},{:.3},{},{},{},{}\n",
                 csv_esc(&c.target.label),
@@ -1356,10 +1660,16 @@ fn save_csv(path: &str, cells: &[CellResult]) {
                 i + 1,
                 m.wall_clock_ms,
                 m.ttft_ms.map(|v| format!("{:.3}", v)).unwrap_or_default(),
-                m.prompt_tok_s.map(|v| format!("{:.3}", v)).unwrap_or_default(),
-                m.completion_tok_s.map(|v| format!("{:.3}", v)).unwrap_or_default(),
+                m.prompt_tok_s
+                    .map(|v| format!("{:.3}", v))
+                    .unwrap_or_default(),
+                m.completion_tok_s
+                    .map(|v| format!("{:.3}", v))
+                    .unwrap_or_default(),
                 m.e2e_latency_ms,
-                m.tokens_generated.map(|v| v.to_string()).unwrap_or_default(),
+                m.tokens_generated
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
                 m.inter_token_latencies_ms.len(),
                 itl_p50,
                 itl_p95,
@@ -1407,15 +1717,23 @@ mod coherence_tests {
         assert!(looks_degenerate(&"--- ".repeat(40)));
         // The four that slipped through the first version, verbatim from the sweep. Each
         // has an ordinary share of distinct words and is plainly not an answer.
-        assert!(looks_degenerate("time-olde olde olde olde olde olde olde olde olde olde olde ol"));
         assert!(looks_degenerate(
-            "person, the end of a person, the end of a person, the end of a person, the end of a"));
+            "time-olde olde olde olde olde olde olde olde olde olde olde ol"
+        ));
         assert!(looks_degenerate(
-            "king who was able to see a time, that, that, that, that, that, that, that, that,"));
+            "person, the end of a person, the end of a person, the end of a person, the end of a"
+        ));
+        assert!(looks_degenerate(
+            "king who was able to see a time, that, that, that, that, that, that, that, that,"
+        ));
         assert!(looks_degenerate(
             "time, in a kingdom far far away, to a time, in a kingdom far far away, to a time, \
-             in a kingdom far far away, to a"));
-        assert!(looks_degenerate(&format!("kingdom{}", "\u{FFFD}".repeat(55))));
+             in a kingdom far far away, to a"
+        ));
+        assert!(looks_degenerate(&format!(
+            "kingdom{}",
+            "\u{FFFD}".repeat(55)
+        )));
         // Single-token loops - the other shape this takes.
         assert!(looks_degenerate(&"three ".repeat(30)));
         assert!(looks_degenerate(&"the the the ".repeat(12)));
@@ -1434,6 +1752,8 @@ mod coherence_tests {
         ));
         // Brevity is not degeneracy - a short correct answer must pass.
         assert!(!looks_degenerate("Paris."));
-        assert!(!looks_degenerate("The capital of France is Paris, on the Seine."));
+        assert!(!looks_degenerate(
+            "The capital of France is Paris, on the Seine."
+        ));
     }
 }
