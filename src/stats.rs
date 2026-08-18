@@ -81,15 +81,6 @@ impl Stats {
             format!("{:.0}", val)
         }
     }
-
-    /// Format mean +/- stddev
-    pub fn fmt_mean_std(&self) -> String {
-        format!(
-            "{} +/-{}",
-            self.fmt_val(self.mean),
-            self.fmt_val(self.stddev)
-        )
-    }
 }
 
 fn percentile(sorted: &[f64], pct: f64) -> f64 {
@@ -168,11 +159,11 @@ pub fn print_comparison(label_a: &str, stats_a: &[Stats], label_b: &str, stats_b
 
     println!();
     println!("  {}", border);
-    println!("  Comparison: {} vs {}", label_a, label_b);
+    println!("  Comparison: {} vs {}  (medians)", label_a, label_b);
     println!("  {}", thin);
     println!(
         "  {:<22} {:>16} {:>16} {:>10}",
-        "Metric", label_a, label_b, "Speedup"
+        "Metric", label_a, label_b, "Diff"
     );
     println!("  {}", thin);
 
@@ -201,8 +192,8 @@ pub fn print_comparison(label_a: &str, stats_a: &[Stats], label_b: &str, stats_b
                 println!(
                     "  {:<22} {:>16} {:>16} {:>10}",
                     sa.label,
-                    sa.fmt_val(a),
-                    sb.fmt_val(b),
+                    format!("{} (n={})", sa.fmt_val(a), sa.count),
+                    format!("{} (n={})", sb.fmt_val(b), sb.count),
                     if (a - b).abs() < f64::EPSILON {
                         "="
                     } else {
@@ -236,8 +227,12 @@ pub fn print_comparison(label_a: &str, stats_a: &[Stats], label_b: &str, stats_b
             println!(
                 "  {:<22} {:>16} {:>16} {:>10}",
                 sa.label,
-                sa.fmt_mean_std(),
-                sb.fmt_mean_std(),
+                // The MEDIAN, because that is what the percentage divides. Showing a mean
+                // beside a ratio computed from a median gives a reader two numbers that do
+                // not reconcile, and the first thing anyone does with a comparison table is
+                // check one line by hand.
+                format!("{} (n={})", sa.fmt_val(a), sa.count),
+                format!("{} (n={})", sb.fmt_val(b), sb.count),
                 speedup_str,
             );
         }
@@ -321,15 +316,5 @@ mod tests {
         assert_eq!(t.fmt_val(123.45), "123.5");
         let u = Stats::compute("x", "%", &[1.0]).unwrap();
         assert_eq!(u.fmt_val(85.6), "86"); // {:.0} round
-    }
-
-    #[test]
-    fn fmt_mean_std_combines_both() {
-        let s = Stats::compute("x", "ms", &[100.0, 110.0, 120.0]).unwrap();
-        let out = s.fmt_mean_std();
-        // mean = 110, stddev = 10 → "110ms +/-10ms"
-        assert!(out.contains("110ms"), "{out}");
-        assert!(out.contains("10ms"), "{out}");
-        assert!(out.contains("+/-"), "{out}");
     }
 }
