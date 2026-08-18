@@ -7,8 +7,13 @@ what each of them actually did rather than what it claims.
 
 ```sh
 assay --ollama http://localhost:11434 --loken http://localhost:11435 \
-         --models qwen3:latest --num-ctx 4096 --prompts short,medium,long
+      --models qwen3:latest --num-ctx 4096 --prompts short,medium,long --stream
 ```
+
+`--stream` is not optional if you intend to compare decode rates. Without it no engine can
+report a client-observed first-token time, so the figure becomes tokens over the whole
+wall clock — prefill included — for everyone, and the prefill/decode energy split does not
+happen at all.
 
 ## What it measures, and why it is fussy about it
 
@@ -20,6 +25,20 @@ difference between engines hides:
 - **energy, not only speed.** GPU and host samplers run alongside the request, so a result
   carries joules per token beside tokens per second. Two engines at the same rate are not
   equivalent if one of them draws half again as much.
+
+  Read the joules for what they are: **the machine's draw over the request window, not the
+  engine's**. NVML sums every card present, RAPL returns whole CPU packages — operating
+  system, this process and its own samplers included — and the idle floor is never subtracted,
+  so part of every figure is `idle_power / throughput` and a slower engine is charged for
+  occupying the machine longer. That is a defensible whole-system measurement **on an
+  otherwise idle machine**, and meaningless on a box doing anything else. `--idle-energy-secs`
+  records the idle floor in the JSON so you can subtract it yourself.
+
+  Coverage differs by platform, and the reported labels say which domains are counted:
+  CPU and DRAM energy come from Linux's powercap interface, so a run elsewhere — Windows
+  included — counts **the GPU alone** and its J/token is mechanically lower. The same counters
+  exist on other platforms but live in MSRs that only a kernel driver can read, and a
+  benchmark has no business installing one.
 - **the engines are made comparable before they are compared.** `--num-gpu 0` forces Ollama
   onto the CPU for a CPU-to-CPU run; `--main-gpu` pins it to a chosen card on a box with
   asymmetric GPUs, where its scheduler may otherwise pick the slower one. Without those, the

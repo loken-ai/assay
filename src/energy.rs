@@ -1,32 +1,36 @@
-//! Energy + carbon sampler for one timed decode window.
+//! Energy over a request window, and what that number does and does not contain.
 //!
-//! Measures the energy drawn over a window (start → stop) across three domains
-//! so the bench can rank engines by joules-per-generated-token:
+//! WHAT IS MEASURED. Not the engine's consumption — the machine's, over the window the request
+//! occupies. NVML sums every device present, not the one the model ran on; RAPL returns whole
+//! CPU packages, which includes the operating system, this process and its own samplers. The
+//! idle floor is not subtracted, so a slower engine is charged for occupying the machine
+//! longer, and part of every J/token figure is `idle_power / throughput`.
 //!
-//!   * GPU   — NVML `nvmlDeviceGetTotalEnergyConsumption` (a monotonic mJ
-//!             counter, summed over every CUDA device). When the driver/GPU
-//!             doesn't expose that counter we fall back to integrating
-//!             `power.draw` sampled at ~10 Hz (P·dt). The path actually used
-//!             is recorded in `gpu_path`.
-//!   * CPU   — Intel RAPL package energy: the `intel-rapl:0` (+ `:1`, …)
-//!             `energy_uj` counters under /sys/class/powercap. Wraparound is
-//!             handled via `max_energy_range_uj`.
-//!   * DRAM  — the RAPL `dram` subdomain (`intel-rapl:N:*` where name=="dram"),
-//!             when present.
+//! That makes it a whole-system measurement on a quiet machine, which is a legitimate and
+//! common methodology — it is roughly what MLPerf Power does — and a meaningless one on a box
+//! doing anything else. Benchmark on an idle machine or do not quote the joules.
 //!
-//! RAPL `energy_uj` is root-only on recent kernels (a perf side-channel
-//! mitigation). When it can't be read we degrade gracefully: GPU energy is
-//! still reported and `cpu_rapl_available` is set false with a note. To enable
-//! CPU/DRAM energy without running the bench as root, grant read on the
-//! powercap counters, e.g.:
+//! WHAT IT COVERS, BY PLATFORM. `domains_counted` records which of gpu / cpu_pkg / dram
+//! actually contributed, and it is not the same everywhere:
 //!
-//!   sudo setcap cap_dac_read_search+ep ./assay           # not reliable for sysfs
-//!   # or, more robustly, a udev rule / one-shot chmod:
+//!   * GPU   — NVML's `total_energy_consumption` counter, or power draw integrated over the
+//!             window when the counter is absent. Works wherever NVML does, Windows included.
+//!   * CPU   — Intel RAPL package energy from the `energy_uj` counters under
+//!             /sys/class/powercap. **Linux only.** The same counters exist elsewhere, but in
+//!             MSRs that only ring 0 can read: no userspace path without a kernel driver, and
+//!             Intel's supported route, Power Gadget, was discontinued in 2023.
+//!   * DRAM  — the RAPL `dram` subdomain, where the platform exposes one. Same Linux limit.
+//!
+//! So a Windows run counts the GPU alone and its J/token is mechanically lower than a Linux
+//! run of the same work. The two are different quantities; the reported labels say which, so
+//! they are not subtracted from one another by accident.
+//!
+//! Wraparound on the RAPL counters is handled (see `rapl_delta_j`). If the counters are
+//! unreadable — no permission, no hardware, wrong platform — the window is still reported,
+//! the missing domain is absent from `domains_counted`, and `note` says why. To grant access
+//! on Linux without running as root:
+//!
 //!   sudo chmod -R a+r /sys/class/powercap/intel-rapl:*/energy_uj
-//!   # (resets on reboot; for persistence add a tmpfiles.d/udev rule)
-//!
-//! All fields are optional/zero-cost: when no counter is available the window
-//! simply reports `domains_counted` empty and the per-token energy is None.
 
 use serde::Serialize;
 use std::path::PathBuf;
@@ -423,8 +427,15 @@ impl EnergySampler {
         let (gpu_energy_j, gpu_path) = if let Some(start_j) = self.gpu_start_j {
             // NVML counter path: re-read and diff (monotonic, no wrap in practice
             // over a bench window).
-            let end_j = nvml_energy_snapshot_j().unwrap_or(start_j);
-            ((end_j - start_j).max(0.0), GpuEnergyPath::NvmlCounter)
+            // A failed closing read used to fall back to the opening one, which yields
+            // exactly 0 J: a plausible small number, indistinguishable from a genuinely
+            // idle GPU, that drags the whole J/token figure down by an order of magnitude
+            // with nothing in the output to say a read was lost. Report no GPU domain
+            // instead — an absent column is visible, a wrong one is not.
+            match nvml_energy_snapshot_j() {
+                Some(end_j) => ((end_j - start_j).max(0.0), GpuEnergyPath::NvmlCounter),
+                None => (0.0, GpuEnergyPath::None),
+            }
         } else if let Some(stop) = self.power_stop.take() {
             stop.store(true, Ordering::Relaxed);
             let j = match self.power_handle.take() {
@@ -639,7 +650,21 @@ fn build_note(
                 .to_string(),
         );
     } else if !have_rapl_files {
-        parts.push("CPU RAPL unavailable (no intel-rapl powercap domains)".to_string());
+        // Say WHY, because the reason decides whether the reader can do anything about it.
+        // On Linux a missing powercap tree is a kernel/hardware question. Everywhere else it
+        // is structural: the RAPL counters exist, but they live in MSRs that only ring 0 can
+        // read, so a userspace tool cannot reach them without shipping a kernel driver —
+        // which a benchmark has no business installing. Intel's own Power Gadget, the
+        // supported way to do it, was discontinued in 2023.
+        if cfg!(target_os = "linux") {
+            parts.push("CPU energy unavailable (no intel-rapl powercap domains)".to_string());
+        } else {
+            parts.push(
+                "CPU energy unavailable on this platform: RAPL is readable only from a kernel \
+                 driver outside Linux, so the figures below count the GPU alone"
+                    .to_string(),
+            );
+        }
     }
     match gpu_path {
         GpuEnergyPath::None => parts.push("GPU energy unavailable (no NVML/GPU)".to_string()),
