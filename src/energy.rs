@@ -122,16 +122,20 @@ impl EnergyWindow {
 
     /// Decode-phase energy per generated token (J/tok), excluding prefill.
     /// Prefer this over `j_per_tok` for any cross-engine comparison — `tokens`
-    /// is the decode token count, and the energy excludes the prefill the cache
-    /// confound lives in. Falls back to the full-window value when no decode
-    /// split is available.
+    /// is the decode token count, and the energy excludes the prefill the cache confound
+    /// lives in.
+    ///
+    /// None when there is no split to report — which is every non-streamed request, since the
+    /// boundary is the client's first-token time and there is none. It used to fall back to
+    /// the full window instead, so a row labelled "decode" carried prefill energy and read as
+    /// the confound-free figure it exists to replace. An absent row says that plainly.
     pub fn j_per_decode_tok(&self, tokens: u64) -> Option<f64> {
         if tokens == 0 {
             return None;
         }
         match self.decode_energy_j {
             Some(e) if e > 0.0 => Some(e / tokens as f64),
-            _ => self.j_per_tok(tokens),
+            _ => None,
         }
     }
 }
@@ -771,20 +775,23 @@ mod tests {
         assert!((base.j_per_decode_tok(60).unwrap() - 0.4).abs() < 1e-9);
         assert!((base.j_per_tok(60).unwrap() - 2.0).abs() < 1e-9);
 
-        // No split available: fall back to the full window rather than to None,
-        // so a machine without the boundary still reports a real number.
+        // No split available — every non-streamed request, since the boundary is the
+        // client's first-token time. It must NOT fall back to the full window: that put
+        // prefill energy under a label saying "decode", which is the confound this metric
+        // exists to remove. An absent row is honest; a mislabelled one is not.
         let no_split = EnergyWindow {
             decode_energy_j: None,
             ..base.clone()
         };
-        assert!((no_split.j_per_decode_tok(60).unwrap() - 2.0).abs() < 1e-9);
+        assert!(no_split.j_per_decode_tok(60).is_none());
 
-        // A zero-energy split is not a measurement; it must not report 0 J/tok.
+        // A zero-energy split is not a measurement either, and for the same reason it does
+        // not become the full window.
         let zero_split = EnergyWindow {
             decode_energy_j: Some(0.0),
             ..base.clone()
         };
-        assert!((zero_split.j_per_decode_tok(60).unwrap() - 2.0).abs() < 1e-9);
+        assert!(zero_split.j_per_decode_tok(60).is_none());
 
         assert!(
             base.j_per_decode_tok(0).is_none(),
