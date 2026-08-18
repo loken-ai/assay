@@ -7,7 +7,7 @@
 #
 #   gpu_policy_resolve            # reads GPUS / OLLAMA_GPUS / LOKEN_GPUS / VLLM_GPUS
 #   gpu_env_for <engine>          # prints the env assignments to prefix that engine's launch
-#   gpu_extra_args_for <engine>   # prints the per-engine flags (ollama --main-gpu, vLLM -tp)
+#   gpu_extra_args_for <engine>   # prints the per-engine flags (vLLM --tensor-parallel-size)
 #
 # GPUS is the policy: a comma-separated list of PHYSICAL card indices, or "all" (default).
 # Per-engine overrides exist for the deliberate asymmetric run — a fairness knob you can turn

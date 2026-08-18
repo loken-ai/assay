@@ -43,33 +43,24 @@ LOKEN_BIN="${LOKEN_BIN:-../loken/target/release/server}"   # one CUDA binary, bo
 ASSAY="${ASSAY:-target/release/assay}"
 VLLM_PORT=8000
 BENCH_MODE="${BENCH_MODE:-cpu}"
-GPU_PIN="${GPU_PIN:-}"                       # e.g. 0 → expose ONLY that card's UUID
-MAIN_GPU="${MAIN_GPU:-0}"   # ollama-only index; empty = do not restrict it to one card
+GPU_PIN="${GPU_PIN:-}"                       # older spelling of GPUS=<n>: expose only that card
 OUT="${OUT:-results/fairbench.json}"
 OLLAMA_PORT="${OLLAMA_PORT:-11434}"          # each engine's port, so two runs can coexist
 LOKEN_PORT="${LOKEN_PORT:-11435}"
 [ "$BENCH_MODE" = cpu ] || [ "$BENCH_MODE" = gpu ] || { echo "BENCH_MODE must be cpu|gpu" >&2; exit 1; }
 
-# GPU order: CUDA_VISIBLE_DEVICES (the var ollama, LOKEN AND vLLM honour — NOT
-# CUDA_DEVICE_ORDER) lists the device UUIDs in nvidia-smi order, so index 0 means the
-# same physical card in every engine's enumeration, all cards visible. BUT ollama's
-# scheduler still self-picks the slower card for a single-GPU-fit model even
-# with the right CVD (proven) — so ollama ALSO gets `--main-gpu 0` to force it onto
-# the fast card. LOKEN and vLLM (tp=1) use device 0. Result: all engines on the SAME
-# card → the comparison measures the engine, not the GPU. That reasoning holds only
-# while the weights FIT one card; above it the same flag becomes a handicap, which is
-# what the size-derived decision below undoes.
-ALL_UUIDS=$(nvidia-smi --query-gpu=uuid --format=csv,noheader 2>/dev/null | paste -sd, || echo "")
-FAST_UUID=$(nvidia-smi --query-gpu=uuid --format=csv,noheader 2>/dev/null | head -1)
-if [ -n "$GPU_PIN" ]; then
-  CVD=$(nvidia-smi --query-gpu=uuid --format=csv,noheader 2>/dev/null | sed -n "$((GPU_PIN+1))p")
-  FAST_UUID="$CVD"
-else
-  CVD="$ALL_UUIDS"
-fi
-PINENV=(env "CUDA_VISIBLE_DEVICES=$CVD")
-export CUDA_VISIBLE_DEVICES="$CVD"   # inherited by the vllm-serve-*.sh helpers
-NUMGPU=(); LLMSERVE=(); OLLAMA_MG=(); OLLAMA_SPREAD=()
+# WHICH CARDS EACH ENGINE MAY USE — read from gpu-policy.sh, which is the only place that
+# decision is written. It resolves a card list to device UUIDs, because CUDA_VISIBLE_DEVICES=0
+# means a different physical card depending on the ordering, and translates one policy into
+# each engine's own lever: OLLAMA_SCHED_SPREAD when ollama can see more than one card (seeing
+# them is not using them — its scheduler otherwise settles on one), and --tensor-parallel-size
+# for vLLM.
+#
+# GPU_PIN is kept as the older spelling of "expose only this card"; fold it in before the
+# policy is read, so there is still exactly one place the decision is made.
+[ -n "$GPU_PIN" ] && GPUS="${GPUS:-$GPU_PIN}"
+. "$(dirname "$(readlink -f "$0")")/gpu-policy.sh"
+NUMGPU=(); LLMSERVE=()
 if [ "$BENCH_MODE" = cpu ]; then NUMGPU=(--num-gpu 0); LLMSERVE=(--cpu); fi
 
 # First model of the cell, parsed from --models: the placement decision below needs it,
@@ -91,15 +82,14 @@ blob_bytes_of() {
   stat -c%s "$MODELS_DIR/blobs/$blob" 2>/dev/null || echo 0
 }
 
-# HOW MANY CARDS OLLAMA MAY USE — derived from the weights, never from a list of names.
-# `--main-gpu N` does not merely PREFER a card, it RESTRICTS ollama to one: its own log
-# says `gpu_count=1 available_gpu_count=2`. That is the right handicap while the weights
-# fit that card — every engine then measured on the same silicon — and the wrong one above
-# it, where ollama gets one card plus host spill while the others get the machine.
-# Measured 2026-08-14 on a 42.5 GB model: ollama offloaded 26 layers to a single card and
-# mapped 26.2 GB to the host while the second card sat at 18 MiB. Every cell for a model
-# larger than one card had been scoring our placement against ollama's missing card.
-# So pin to the fast card only when it fits there; otherwise let ollama spread over all.
+# HOW MANY CARDS — derived from the weights, never from a list of model names.
+#
+# Restricting ollama to one card is the right handicap while the weights fit that card: every
+# engine is then measured on the same silicon. Above it the same restriction inverts — ollama
+# gets one card plus host spill while the others get the machine, and the resulting "win" is a
+# missing card rather than a placement. Measured once on a model larger than one card: ollama
+# offloaded most layers to a single card and mapped the rest to the host, while the second card
+# sat idle. So restrict only when it fits; otherwise let every engine have everything.
 _one_card=0
 if [ "$BENCH_MODE" = gpu ]; then
   while read -r _mb; do
@@ -111,14 +101,12 @@ if [ "$BENCH_MODE" = gpu ]; then
 fi
 _blob=$(blob_bytes_of "${_probe_model:-}")
 if [ "$BENCH_MODE" = gpu ] && [ -z "$GPU_PIN" ] && [ "$_one_card" -gt 0 ] && [ "$_blob" -gt "$_one_card" ]; then
-  MAIN_GPU=""                 # one card cannot hold it: stop restricting ollama to one
-  : "${FAIR_SPREAD:=1}"       # and let its scheduler reach every visible card
-  echo "  ⓘ $_probe_model weighs $((_blob/1000000000)) GB > one card ($((_one_card/1000000000)) GB) — ollama unpinned, SCHED_SPREAD on" >&2
+  OLLAMA_GPUS=all             # one card cannot hold it: give every engine the machine
+  LOKEN_GPUS=all
+  VLLM_GPUS=all
+  echo "  ⓘ $_probe_model weighs $((_blob/1000000000)) GB > one card ($((_one_card/1000000000)) GB) — every engine unpinned" >&2
 fi
-if [ "$BENCH_MODE" = gpu ] && [ -n "$MAIN_GPU" ]; then OLLAMA_MG=(--main-gpu "$MAIN_GPU"); fi
-# FAIR_SPREAD=1 → ollama uses ALL exposed GPUs (OLLAMA_SCHED_SPREAD). Derived above for
-# anything larger than one card; still settable by hand to override the derivation.
-if [ "$BENCH_MODE" = gpu ] && [ -z "$GPU_PIN" ] && [ "${FAIR_SPREAD:-0}" = 1 ]; then OLLAMA_SPREAD=(OLLAMA_SCHED_SPREAD=1); fi
+gpu_policy_banner
 # --stream is the protocol default: it measures a decode rate client-side and identically
 # for all three engines. STREAM=0 lifts it so the non-streaming path can be covered too -
 # most integrations call it, and it had never been measured.
@@ -218,7 +206,7 @@ fi
 for _att in 1 2 3; do
   kill_all
   echo "▶ ollama (default params${GPU_PIN:+, pinned GPU$GPU_PIN})${_att:+ [try $_att]} …"
-  "${PINENV[@]}" env OLLAMA_VULKAN=0 "${OLLAMA_SPREAD[@]}" OLLAMA_MODELS="$MODELS_DIR/" nohup "$OLLAMA_BIN" serve >/tmp/ollama_fairbench.log 2>&1 &
+  env $(gpu_env_for ollama) OLLAMA_VULKAN=0 OLLAMA_MODELS="$MODELS_DIR/" nohup "$OLLAMA_BIN" serve >/tmp/ollama_fairbench.log 2>&1 &
   wait_url http://127.0.0.1:$OLLAMA_PORT/api/version 60 || { echo "ollama did not start" >&2; }
   # PRE-BENCH placement probe (GPU mode, NON-spread only): force a one-token load and check
   # whether ollama CPU-fell BEFORE wasting a full multi-context bench; retry on a fresh
@@ -226,7 +214,7 @@ for _att in 1 2 3; do
   # multi-GPU placement on a fresh load, and a probe load at a DIFFERENT context size than
   # the bench forces a reload that itself CPU-falls (the probe would sabotage the fix). The
   # probe must load at the SAME num_ctx as the bench (4096) so it does not trigger a reload.
-  if [ "$BENCH_MODE" = gpu ] && [ -n "$_probe_model" ] && [ ${#OLLAMA_SPREAD[@]} -eq 0 ]; then
+  if [ "$BENCH_MODE" = gpu ] && [ -n "$_probe_model" ] && [ "$(_gpu_count "$OLLAMA_GPUS")" = 1 ]; then
     curl -s -m 180 http://127.0.0.1:$OLLAMA_PORT/api/generate -H "Content-Type: application/json" \
       -d "{\"model\":\"$_probe_model\",\"prompt\":\"hi\",\"stream\":false,\"options\":{\"num_predict\":1,\"num_ctx\":4096}}" >/dev/null 2>&1 || true
     # `|| true`: cpubuf_of_log is a grep pipeline, and under `set -o pipefail`
@@ -242,7 +230,7 @@ for _att in 1 2 3; do
     [ "$cpubuf" -gt 2000 ] && echo "  ⚠ ollama STILL CPU-fell after 3 tries (CPU buffer ${cpubuf} MiB) — model is VRAM-marginal on this box; recording ollama's CPU-fallback as its real default behaviour" >&2
   fi
   cool_wait
-  "$ASSAY" --ollama http://127.0.0.1:$OLLAMA_PORT "${NUMGPU[@]}" "${OLLAMA_MG[@]}" "${COMMON[@]}" "$@" -o "$TMP/ollama.json" || true
+  "$ASSAY" --ollama http://127.0.0.1:$OLLAMA_PORT "${NUMGPU[@]}" "${COMMON[@]}" "$@" -o "$TMP/ollama.json" || true
   break
 done
 if [ -f "$TMP/ollama.json" ]; then PARTS+=("$TMP/ollama.json"); fi
@@ -261,7 +249,7 @@ echo "▶ LOKEN${GPU_PIN:+ (pinned GPU$GPU_PIN)}${LLMSERVE:+ ${LLMSERVE[*]}} …
 # fifth of the rate. The bench must measure the server the config describes.
 LOKEN_ABS="$(cd "$(dirname "$LOKEN_BIN")" && pwd)/$(basename "$LOKEN_BIN")"
 CONFIG_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-( cd "$CONFIG_DIR" && "${PINENV[@]}" nohup "$LOKEN_ABS" serve --models-dir "$MODELS_DIR" --keep-alive 30m "${LLMSERVE[@]}" >/tmp/loken_fairbench.log 2>&1 & )
+( cd "$CONFIG_DIR" && env $(gpu_env_for loken) nohup "$LOKEN_ABS" serve --models-dir "$MODELS_DIR" --keep-alive 30m "${LLMSERVE[@]}" >/tmp/loken_fairbench.log 2>&1 & )
 wait_url http://127.0.0.1:$LOKEN_PORT/api/version 60 || { echo "LOKEN did not start" >&2; }
 cool_wait
 "$ASSAY" --loken http://127.0.0.1:$LOKEN_PORT "${NUMGPU[@]}" "${COMMON[@]}" "$@" -o "$TMP/loken.json" || true
@@ -274,11 +262,13 @@ if [ "$BENCH_MODE" = gpu ] && [ -n "${VLLM_SERVE:-}" ]; then
   # Pin vLLM to the chosen card. vLLM only accepts INTEGER device indices in
   # CUDA_VISIBLE_DEVICES (a UUID breaks its int() parse), and the helper forces
   # CUDA_DEVICE_ORDER=PCI_BUS_ID, where the index is a stable bus position.
+  # vLLM's own index flag, kept because its launcher parses integers and a UUID breaks it.
+  # The card SET comes from the policy; this only says which of them it starts on.
   VG=(--gpu "${GPU_PIN:-0}")
   if [[ "$VLLM_SERVE" == hf:* ]]; then
-    nohup scripts/vllm-serve-hf.sh ${VLLM_SERVE#hf:} "${VG[@]}" --port "$VLLM_PORT" >/tmp/vllm_fairbench.log 2>&1 &
+    nohup "$(dirname "$(readlink -f "$0")")/vllm-serve-hf.sh" ${VLLM_SERVE#hf:} "${VG[@]}" --port "$VLLM_PORT" >/tmp/vllm_fairbench.log 2>&1 &
   else
-    nohup scripts/vllm-serve-ollama.sh $VLLM_SERVE "${VG[@]}" --port "$VLLM_PORT" >/tmp/vllm_fairbench.log 2>&1 &
+    nohup "$(dirname "$(readlink -f "$0")")/vllm-serve-ollama.sh" $VLLM_SERVE "${VG[@]}" --port "$VLLM_PORT" >/tmp/vllm_fairbench.log 2>&1 &
   fi
   echo "  waiting for vLLM /v1/models (weight load, minutes)…"
   for i in $(seq 1 300); do
