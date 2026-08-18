@@ -920,7 +920,36 @@ fn compare_to_baseline(path: &str, cells: &[CellResult]) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Pair each iteration's energy window with the token count of that same iteration.
+///
+/// The pairing is positional, so it is checked rather than trusted. Both vectors are filled in
+/// one arm of one match and nowhere else; if that ever stops being true, every figure derived
+/// here would be a real window divided by a different request's tokens — arithmetic that looks
+/// entirely plausible and is wrong. Length drift yields nothing and says so, because a missing
+/// energy column is a visible problem and a wrong one is not.
+fn per_token(
+    metrics: &[IterationMetrics],
+    energy: &[Option<EnergyWindow>],
+    f: impl Fn(&EnergyWindow, u64) -> Option<f64>,
+) -> Vec<f64> {
+    if metrics.len() != energy.len() {
+        eprintln!(
+            "    ⚠️  {} iterations against {} energy windows — per-token energy withheld for this cell",
+            metrics.len(),
+            energy.len()
+        );
+        return Vec::new();
+    }
+    metrics
+        .iter()
+        .zip(energy.iter())
+        .filter_map(|(m, e)| {
+            e.as_ref()
+                .and_then(|w| f(w, m.tokens_generated.unwrap_or(0)))
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_cell<'a>(
     client: &BenchClient,
@@ -1224,8 +1253,16 @@ async fn run_cell<'a>(
             }
         }
     }
-    debug_assert_eq!(all_metrics.len(), all_gpu_samples.len(), "gpu samples desynchronised");
-    debug_assert_eq!(all_metrics.len(), all_host_samples.len(), "host samples desynchronised");
+    debug_assert_eq!(
+        all_metrics.len(),
+        all_gpu_samples.len(),
+        "gpu samples desynchronised"
+    );
+    debug_assert_eq!(
+        all_metrics.len(),
+        all_host_samples.len(),
+        "host samples desynchronised"
+    );
 
     // Coherence gate. If --require-substr was set, each iteration's preview
     // must contain at least one required substring (case-insensitive). A
@@ -1680,6 +1717,59 @@ fn normalize_url(input: &str) -> String {
         format!("http://localhost:{}", port)
     } else {
         format!("http://{}", trimmed)
+    }
+}
+
+#[cfg(test)]
+mod pairing_tests {
+    use super::per_token;
+    use crate::api::IterationMetrics;
+    use crate::energy::{EnergyWindow, GpuEnergyPath};
+
+    fn window(joules: f64) -> Option<EnergyWindow> {
+        Some(EnergyWindow {
+            gpu_energy_j: joules,
+            cpu_pkg_energy_j: 0.0,
+            dram_energy_j: 0.0,
+            energy_j: joules,
+            duration_s: 1.0,
+            gpu_path: GpuEnergyPath::NvmlCounter,
+            cpu_rapl_available: false,
+            dram_rapl_available: false,
+            domains_counted: vec!["gpu".into()],
+            note: None,
+            gpu_decode_j: None,
+            cpu_pkg_decode_j: None,
+            dram_decode_j: None,
+            decode_energy_j: None,
+            decode_duration_s: None,
+        })
+    }
+
+    fn ran(tokens: u64) -> IterationMetrics {
+        IterationMetrics {
+            tokens_generated: Some(tokens),
+            ..Default::default()
+        }
+    }
+
+    /// Each window divides the tokens of ITS OWN iteration. A failed request used to push a
+    /// window without pushing metrics, after which every later window divided a different
+    /// request's token count — arithmetic that reads perfectly and is wrong.
+    #[test]
+    fn a_window_is_divided_by_its_own_iterations_tokens() {
+        let m = vec![ran(10), ran(100)];
+        let e = vec![window(20.0), window(50.0)];
+        assert_eq!(per_token(&m, &e, |w, t| w.j_per_tok(t)), vec![2.0, 0.5]);
+    }
+
+    /// If the two sides ever drift, the column is withheld. A missing energy figure is a
+    /// visible problem; a confidently wrong one is not.
+    #[test]
+    fn drift_between_the_two_sides_yields_nothing() {
+        let m = vec![ran(10), ran(100)];
+        let e = vec![window(20.0)];
+        assert!(per_token(&m, &e, |w, t| w.j_per_tok(t)).is_empty());
     }
 }
 
