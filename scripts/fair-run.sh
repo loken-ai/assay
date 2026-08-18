@@ -38,7 +38,7 @@
 # the other engines are launched CPU-only alongside it.
 set -euo pipefail
 MODELS_DIR="${MODELS_DIR:-$HOME/.ollama/models}"   # where ollama keeps its blobs
-OLLAMA_BIN=/usr/local/bin/ollama
+OLLAMA_BIN="${OLLAMA_BIN:-$(command -v ollama || echo ollama)}"
 LOKEN_BIN="${LOKEN_BIN:-../loken/target/release/server}"   # one CUDA binary, both modes
 ASSAY="${ASSAY:-target/release/assay}"
 VLLM_PORT=8000
@@ -171,9 +171,67 @@ kill_all() {
   done
   sleep 3   # extra settle: VRAM "used" can read low before the allocator fully releases
 }
-wait_url() { for i in $(seq 1 "${2:-60}"); do curl -s -m2 "$1" >/dev/null 2>&1 && return 0; sleep 1; done; return 1; }
+# wait_url <url> [seconds] [must-contain] — an engine answering is not an engine ready:
+# vLLM serves /v1/models while the weights are still loading, so the third argument lets a
+# probe demand a substring rather than a status code.
+wait_url() {
+  local url="$1" secs="${2:-60}" want="${3:-}"
+  for _ in $(seq 1 "$secs"); do
+    if [ -n "$want" ]; then
+      curl -s -m2 "$url" 2>/dev/null | grep -q "$want" && return 0
+    else
+      curl -s -m2 "$url" >/dev/null 2>&1 && return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+# ── THE ENGINES ──────────────────────────────────────────────────────────────────────────
+# One declaration each. Everything below starts, probes and stops them identically; what
+# differs between them is DATA in this table, not three shapes of code further down.
+#
+#   BIN    what to execute                ARGS   its own arguments
+#   ENV    what it needs beyond the GPU policy   CWD  where to run it from
+#   PROBE  the URL that answers when it is up    WANT a substring the probe must return
+#   WAIT   seconds to allow                      LOG  where its output goes
+declare -A E_BIN E_ARGS E_ENV E_CWD E_PROBE E_WANT E_WAIT
+
+engine_start() {
+  local n="$1"
+  # Two statements, not one: bash expands every word of a `local` before assigning any of
+  # them, so "$n" in a second assignment on the same line reads the OUTER n — unset here.
+  local log="$LOGDIR/$n.log"
+  kill_all
+  mkdir -p "$LOGDIR"
+  ( cd "${E_CWD[$n]:-$PWD}" \
+    && env $(gpu_env_for "$n") ${E_ENV[$n]:-} nohup "${E_BIN[$n]}" ${E_ARGS[$n]:-} >"$log" 2>&1 & )
+  wait_url "${E_PROBE[$n]}" "${E_WAIT[$n]:-60}" "${E_WANT[$n]:-}" \
+    || { echo "  ⚠ $n did not come up within ${E_WAIT[$n]:-60}s — see $log" >&2; return 1; }
+  return 0
+}
 
 TMP=$(mktemp -d); PARTS=()
+TMPDIR_LOGS="$TMP/logs"; LOGDIR="${LOGDIR:-$TMPDIR_LOGS}"; mkdir -p "$LOGDIR"
+
+# The three engines, declared once.
+LOKEN_ABS="$(cd "$(dirname "$LOKEN_BIN")" && pwd)/$(basename "$LOKEN_BIN")"
+E_BIN[ollama]="$OLLAMA_BIN"; E_ARGS[ollama]="serve"
+E_ENV[ollama]="OLLAMA_VULKAN=0 OLLAMA_MODELS=$MODELS_DIR/"
+E_PROBE[ollama]="http://127.0.0.1:$OLLAMA_PORT/api/version"; E_WAIT[ollama]=60
+
+E_BIN[loken]="$LOKEN_ABS"; E_ARGS[loken]="serve --models-dir $MODELS_DIR --keep-alive 30m ${LLMSERVE[*]:-}"
+# Started from the directory that HOLDS config.toml. There is no --config flag: the server
+# looks for ./config.toml first, so the working directory silently decides which configuration
+# is measured — and a different memory fraction is a different per-card budget, hence a
+# different placement for any model near the boundary.
+E_CWD[loken]="$(cd "$(dirname "$0")/.." && pwd)"
+E_PROBE[loken]="http://127.0.0.1:$LOKEN_PORT/api/version"; E_WAIT[loken]=60
+
+# vLLM is launched through a wrapper because its own flags differ per source (an HF repo or a
+# converted ollama tag). The wrapper is data here like the others, not a special case below.
+E_BIN[vllm]="$(dirname "$(readlink -f "$0")")/vllm-serve-hf.sh"
+E_PROBE[vllm]="http://127.0.0.1:$VLLM_PORT/v1/models"; E_WANT[vllm]='"id"'; E_WAIT[vllm]=600
 echo "▶ BENCH_MODE=$BENCH_MODE  GPU_PIN='${GPU_PIN:-none}'  → $OUT"
 
 # ── 1. ollama, isolated ──────────────────────────────────────────────────────
@@ -205,9 +263,8 @@ if [ "$BENCH_MODE" = gpu ] && [ -n "$GPU_PIN" ]; then
 fi
 for _att in 1 2 3; do
   kill_all
-  echo "▶ ollama (default params${GPU_PIN:+, pinned GPU$GPU_PIN})${_att:+ [try $_att]} …"
-  env $(gpu_env_for ollama) OLLAMA_VULKAN=0 OLLAMA_MODELS="$MODELS_DIR/" nohup "$OLLAMA_BIN" serve >/tmp/ollama_fairbench.log 2>&1 &
-  wait_url http://127.0.0.1:$OLLAMA_PORT/api/version 60 || { echo "ollama did not start" >&2; }
+  echo "▶ ollama (default params)${_att:+ [try $_att]} …"
+  engine_start ollama || true
   # PRE-BENCH placement probe (GPU mode, NON-spread only): force a one-token load and check
   # whether ollama CPU-fell BEFORE wasting a full multi-context bench; retry on a fresh
   # restart if it did. SKIPPED when SCHED_SPREAD is on: spread already gives correct
@@ -222,7 +279,7 @@ for _att in 1 2 3; do
     # into a silent death of the whole cell - the empty-string guard below never
     # gets to run. That is how qwen3.5:35b produced no row while both engines
     # served it perfectly well by hand.
-    cpubuf=$(cpubuf_of_log /tmp/ollama_fairbench.log || true); [ -z "$cpubuf" ] && cpubuf=0
+    cpubuf=$(cpubuf_of_log "$LOGDIR/ollama.log" || true); [ -z "$cpubuf" ] && cpubuf=0
     if [ "$cpubuf" -gt 2000 ] && [ "$_att" -lt 3 ]; then
       echo "  ⚠ ollama CPU-fell at load (CPU model buffer ${cpubuf} MiB) — retrying on fresh restart" >&2
       continue
@@ -237,20 +294,8 @@ if [ -f "$TMP/ollama.json" ]; then PARTS+=("$TMP/ollama.json"); fi
 
 # ── 2. LOKEN, isolated ───────────────────────────────────────────────────────
 kill_all
-echo "▶ LOKEN${GPU_PIN:+ (pinned GPU$GPU_PIN)}${LLMSERVE:+ ${LLMSERVE[*]}} …"
-# Start the server from the directory that HOLDS config.toml. There is no --config
-# flag: the server looks for `./config.toml` first (config.rs), so the working
-# directory silently decides which configuration is measured. Launched from the
-# repository root the file is not found and the built-in default applies - a
-# different max_gpu_memory_fraction, hence a different per-card budget, hence a
-# different PLACEMENT for any model sitting near the boundary. deepseek-r1:70b-q3ks
-# is 30.9 GB against two 16.4 GB cards: at the configured fraction it loads
-# tensor-parallel, at the default it spills ten layers to the host and decodes at a
-# fifth of the rate. The bench must measure the server the config describes.
-LOKEN_ABS="$(cd "$(dirname "$LOKEN_BIN")" && pwd)/$(basename "$LOKEN_BIN")"
-CONFIG_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-( cd "$CONFIG_DIR" && env $(gpu_env_for loken) nohup "$LOKEN_ABS" serve --models-dir "$MODELS_DIR" --keep-alive 30m "${LLMSERVE[@]}" >/tmp/loken_fairbench.log 2>&1 & )
-wait_url http://127.0.0.1:$LOKEN_PORT/api/version 60 || { echo "LOKEN did not start" >&2; }
+echo "▶ LOKEN${LLMSERVE:+ ${LLMSERVE[*]}} …"
+engine_start loken || true
 cool_wait
 "$ASSAY" --loken http://127.0.0.1:$LOKEN_PORT "${NUMGPU[@]}" "${COMMON[@]}" "$@" -o "$TMP/loken.json" || true
 if [ -f "$TMP/loken.json" ]; then PARTS+=("$TMP/loken.json"); fi
@@ -258,23 +303,19 @@ if [ -f "$TMP/loken.json" ]; then PARTS+=("$TMP/loken.json"); fi
 # ── 3. vLLM, isolated (GPU only, when requested) ─────────────────────────────
 if [ "$BENCH_MODE" = gpu ] && [ -n "${VLLM_SERVE:-}" ]; then
   kill_all
-  echo "▶ vLLM: $VLLM_SERVE${GPU_PIN:+ (GPU$GPU_PIN)} …"
-  # Pin vLLM to the chosen card. vLLM only accepts INTEGER device indices in
-  # CUDA_VISIBLE_DEVICES (a UUID breaks its int() parse), and the helper forces
-  # CUDA_DEVICE_ORDER=PCI_BUS_ID, where the index is a stable bus position.
-  # vLLM's own index flag, kept because its launcher parses integers and a UUID breaks it.
-  # The card SET comes from the policy; this only says which of them it starts on.
-  VG=(--gpu "${GPU_PIN:-0}")
+  echo "▶ vLLM: $VLLM_SERVE …"
+  # Which wrapper depends on where the weights come from; its own index flag stays because
+  # vLLM parses CUDA_VISIBLE_DEVICES as integers and a UUID breaks it. The card SET is the
+  # policy's; this only says which of those it starts on.
   if [[ "$VLLM_SERVE" == hf:* ]]; then
-    nohup "$(dirname "$(readlink -f "$0")")/vllm-serve-hf.sh" ${VLLM_SERVE#hf:} "${VG[@]}" --port "$VLLM_PORT" >/tmp/vllm_fairbench.log 2>&1 &
+    E_BIN[vllm]="$(dirname "$(readlink -f "$0")")/vllm-serve-hf.sh"
+    E_ARGS[vllm]="${VLLM_SERVE#hf:} --gpu ${GPU_PIN:-0} --port $VLLM_PORT"
   else
-    nohup "$(dirname "$(readlink -f "$0")")/vllm-serve-ollama.sh" $VLLM_SERVE "${VG[@]}" --port "$VLLM_PORT" >/tmp/vllm_fairbench.log 2>&1 &
+    E_BIN[vllm]="$(dirname "$(readlink -f "$0")")/vllm-serve-ollama.sh"
+    E_ARGS[vllm]="$VLLM_SERVE --gpu ${GPU_PIN:-0} --port $VLLM_PORT"
   fi
-  echo "  waiting for vLLM /v1/models (weight load, minutes)…"
-  for i in $(seq 1 300); do
-    curl -s -m2 "http://127.0.0.1:$VLLM_PORT/v1/models" 2>/dev/null | grep -q '"id"' && { echo "  vLLM ready"; break; }
-    sleep 2
-  done
+  echo "  waiting for vLLM to finish loading weights (minutes)…"
+  engine_start vllm || true
   "$ASSAY" --vllm "$VLLM_PORT" "${COMMON[@]}" "$@" -o "$TMP/vllm.json" || true
   if [ -f "$TMP/vllm.json" ]; then PARTS+=("$TMP/vllm.json"); fi
 fi
@@ -284,4 +325,3 @@ kill_all
 mkdir -p "$(dirname "$OUT")"
 jq -s '{timestamp: .[0].timestamp, config: .[0].config, results: (map(.results) | add)}' "${PARTS[@]}" > "$OUT"
 echo "▶ merged ${#PARTS[@]} engine(s) → $OUT"
-scripts/bench_warm.sh "$OUT" 2>/dev/null | sort || true
