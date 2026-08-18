@@ -144,18 +144,11 @@ struct Args {
     #[arg(long, value_delimiter = ',', default_values_t = vec![4096usize])]
     num_ctx: Vec<usize>,
 
-    /// Force Ollama's `num_gpu` (layers offloaded to GPU). Pass `--num-gpu 0`
-    /// for a fair CPU-vs-CPU benchmark against the CPU-only LOKEN build —
-    /// otherwise Ollama auto-offloads to GPU. LOKEN ignores it.
+    /// Force Ollama's `num_gpu` (layers offloaded to GPU). Ollama-only — the other engines
+    /// never receive it, and are put on the CPU by how they were launched instead. Which
+    /// cards each engine may use is decided at launch, not here: see scripts/gpu-policy.sh.
     #[arg(long)]
     num_gpu: Option<usize>,
-
-    /// Force Ollama's `main_gpu` (which GPU index ollama uses). On a box with
-    /// asymmetric GPUs ollama's scheduler may pick the slower card for a model
-    /// that fits either; `--main-gpu 0` pins it to GPU 0 (the fast card) while
-    /// both stay visible, so ollama and LOKEN compare on the same hardware.
-    #[arg(long)]
-    main_gpu: Option<usize>,
 
     /// Comma-separated list of prompt names. Text suite: short, medium, long
     /// (the default). Vision suite: vision_short, vision_medium, vision_long —
@@ -431,22 +424,19 @@ async fn main() {
                         bytes.len(),
                         encoded.len()
                     );
-                    // A vision run with no session id pays a cold prefill on every
-                    // iteration: the image prefix is never reused across requests, so
-                    // what gets measured is the first-token outlier rather than the
-                    // steady state. Measured on a small vision model, the gap between
-                    // the two engines more than halved once the id was passed - which
-                    // means the number without it was reporting the cache, not the
-                    // engines. So a stable id is defaulted when the caller gives none.
+                    // A vision run without a session id pays a cold prefill on every
+                    // iteration, so the figure describes the first-token outlier rather than
+                    // the steady state. It is NOT set automatically: prefix-KV reuse is a
+                    // feature some engines implement and others do not, and switching it on
+                    // by default would turn it on for one side of the comparison only.
                     if args.session_id.is_none() {
-                        args.session_id = Some("bench-vision-auto".to_string());
                         eprintln!(
-                            "\n  ℹ️  Vision bench: auto-set --session-id=bench-vision-auto\n  \
-                                       \x20  to enable image-prefix KV reuse across iters\n  \
-                                       \x20  so the run reports the engines rather than the\n  \
-                                       \x20  cache. Individual iterations may still stop\n  \
-                                       \x20  early. Pass a different --session-id\n  \
-                                       \x20  to override or pass --session-id '' to disable.\n"
+                            "\n  ℹ️  Vision run without --session-id: every iteration pays a\n  \
+                                       \x20  cold image prefill, which measures the first-token\n  \
+                                       \x20  outlier rather than the steady state. Passing an id\n  \
+                                       \x20  enables prefix-KV reuse on engines that implement it\n  \
+                                       \x20  — and on those alone, so the run is then no longer\n  \
+                                       \x20  a like-for-like comparison.\n"
                         );
                     }
                     Some(vec![encoded])
@@ -500,7 +490,6 @@ async fn main() {
         .map(|t| {
             let mut c = BenchClient::with_protocol(t.url.clone(), args.verbose, t.protocol);
             c.set_num_gpu(args.num_gpu);
-            c.set_main_gpu(args.main_gpu);
             c
         })
         .collect();
@@ -1631,6 +1620,12 @@ fn save_json(path: &str, args: &Args, cells: &[CellResult], idle_energy: Option<
             "gpu_sample": !args.no_gpu_sample,
             "energy_measure": !args.no_energy,
             "carbon_intensity_gco2_per_kwh": args.carbon_intensity,
+            // Recorded because it changes what the cell measures: a session id enables
+            // prefix-KV reuse on the engines that implement it, and on those alone. A
+            // reader comparing two result files has to be able to see it was set.
+            "session_id": args.session_id,
+            "unique_prompt": args.unique_prompt,
+            "num_gpu": args.num_gpu,
         },
         "idle_energy_baseline": idle_energy.map(|w| serde_json::json!({
             "energy_j": w.energy_j,

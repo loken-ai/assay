@@ -229,17 +229,10 @@ pub struct BenchClient {
     verbose: bool,
     protocol: Protocol,
     /// When set, injects `num_gpu` into the Ollama `options` (0 = force CPU).
-    /// LOKEN ignores it; the CPU build is already CPU-only. Used for the
-    /// fair CPU-vs-CPU benchmark (Ollama otherwise auto-offloads to GPU).
+    /// Ollama-only: LOKEN and vLLM never see it. It exists for the CPU-vs-CPU cell, where
+    /// the other engines are put on the CPU by how they were launched. Setting it without
+    /// doing the same to them measures one engine on a CPU against another on a GPU.
     num_gpu: Option<usize>,
-    /// When set, injects `main_gpu` into the Ollama `options` - pins ollama to that
-    /// index in its own enumeration while every card stays visible.
-    ///
-    /// It exists for a box whose cards are not equivalent. Ollama's scheduler is free
-    /// to put a model that fits either card on the slower one, and then the two sides
-    /// of the benchmark are not running on the same hardware - which is the one thing
-    /// a comparison may not do. LOKEN and vLLM ignore it; they take the fastest card.
-    main_gpu: Option<usize>,
 }
 
 impl BenchClient {
@@ -255,18 +248,12 @@ impl BenchClient {
             verbose,
             protocol,
             num_gpu: None,
-            main_gpu: None,
         }
     }
 
     /// Force `num_gpu` in the Ollama options (e.g. 0 for a CPU-only bench).
     pub fn set_num_gpu(&mut self, num_gpu: Option<usize>) {
         self.num_gpu = num_gpu;
-    }
-
-    /// Force `main_gpu` in the Ollama options (which physical GPU ollama uses).
-    pub fn set_main_gpu(&mut self, main_gpu: Option<usize>) {
-        self.main_gpu = main_gpu;
     }
 
     fn log_request(&self, method: &str, url: &str, body: &impl Serialize) {
@@ -569,7 +556,6 @@ impl BenchClient {
         num_ctx: Option<usize>,
         session_id: Option<&str>,
         num_gpu: Option<usize>,
-        main_gpu: Option<usize>,
     ) -> serde_json::Value {
         let mut opts = serde_json::Map::new();
         opts.insert("num_predict".into(), serde_json::Value::from(max_tokens));
@@ -585,9 +571,6 @@ impl BenchClient {
         }
         if let Some(ng) = num_gpu {
             opts.insert("num_gpu".into(), serde_json::Value::from(ng));
-        }
-        if let Some(mg) = main_gpu {
-            opts.insert("main_gpu".into(), serde_json::Value::from(mg));
         }
         if let Some(sid) = session_id {
             // LOKEN uses session_id for prefix-KV reuse (vision and text).
@@ -626,7 +609,6 @@ impl BenchClient {
                 num_ctx,
                 session_id,
                 self.num_gpu,
-                self.main_gpu,
             )),
             keep_alive: Some("30m".to_string()),
             images: images.map(<[String]>::to_vec),
@@ -679,24 +661,26 @@ impl BenchClient {
         }
 
         // Extract metrics from response (all durations in nanoseconds)
-        let ttft_ms = body.prompt_eval_duration.map(|ns| ns as f64 / 1_000_000.0);
+        // No stream, no client-observed first token — and vLLM reports none either.
+        let ttft_ms = None;
         let prompt_tokens = body.prompt_eval_count;
         let prompt_tok_s = match (body.prompt_eval_count, body.prompt_eval_duration) {
             (Some(count), Some(dur)) if dur > 0 => Some(count as f64 / (dur as f64 / 1e9)),
             _ => None,
         };
-        let completion_tok_s = match (body.eval_count, body.eval_duration) {
-            (Some(count), Some(dur)) if dur > 0 => Some(count as f64 / (dur as f64 / 1e9)),
+        // Without a stream there is no client-side first-token time, so no engine can offer
+        // a decode-only rate the others can match. The reported figure is therefore tokens
+        // over the client's wall clock — prefill included — on every engine alike, which is
+        // the only definition all three can satisfy. It is not a decode rate, and `--stream`
+        // is what produces one; the server's own split is kept below as a diagnostic.
+        let completion_tok_s = match body.eval_count {
+            Some(count) if wall_ms > 0.0 && count > 0 => Some(count as f64 / (wall_ms / 1000.0)),
             _ => None,
         };
-        let decode_ms_per_token = match (body.eval_count, body.eval_duration) {
-            (Some(count), Some(dur)) if count > 0 => Some((dur as f64 / 1e6) / count as f64),
-            _ => None,
-        };
-        let e2e_latency_ms = body
-            .total_duration
-            .map(|ns| ns as f64 / 1_000_000.0)
-            .unwrap_or(wall_ms);
+        // Length-invariant only where the server reports the split, so it is not part of the
+        // cross-engine comparison — vLLM has no equivalent to compare it against.
+        let decode_ms_per_token = None;
+        let e2e_latency_ms = wall_ms;
         let load_time_ms = body.load_duration.map(|ns| ns as f64 / 1_000_000.0);
 
         Ok(IterationMetrics {
@@ -743,7 +727,6 @@ impl BenchClient {
                 num_ctx,
                 session_id,
                 self.num_gpu,
-                self.main_gpu,
             )),
             keep_alive: Some("30m".to_string()),
             images: images.map(<[String]>::to_vec),
@@ -900,8 +883,13 @@ impl BenchClient {
 
         let ttft_ms = last_response
             .as_ref()
-            .and_then(|b| b.prompt_eval_duration.map(|ns| ns as f64 / 1e6))
-            .or(first_chunk_time);
+            .and_then(|b| b.prompt_eval_duration.map(|ns| ns as f64 / 1e6));
+        // Reported TTFT is the CLIENT's time to the first chunk, on every engine. The
+        // server's prefill duration excludes queueing, scheduling and the HTTP hop, and
+        // vLLM reports no equivalent — comparing one against the other measures the
+        // bookkeeping rather than the engines.
+        let _server_prefill_ms = ttft_ms;
+        let ttft_ms = first_chunk_time;
         let prompt_tokens = last_response.as_ref().and_then(|b| b.prompt_eval_count);
         let prompt_tok_s = last_response.as_ref().and_then(|b| {
             match (b.prompt_eval_count, b.prompt_eval_duration) {
@@ -913,10 +901,8 @@ impl BenchClient {
             .as_ref()
             .and_then(|b| b.eval_count)
             .unwrap_or(token_count);
-        let e2e_latency_ms = last_response
-            .as_ref()
-            .and_then(|b| b.total_duration.map(|ns| ns as f64 / 1e6))
-            .unwrap_or(wall_ms);
+        // End-to-end is the client's wall clock on every engine, for the same reason.
+        let e2e_latency_ms = wall_ms;
         let load_time_ms = last_response
             .as_ref()
             .and_then(|b| b.load_duration.map(|ns| ns as f64 / 1e6));
@@ -1002,8 +988,8 @@ impl BenchClient {
         if completion_tokens == 0 && text.is_empty() {
             return Err("vLLM returned 0 completion tokens".to_string());
         }
-        // No server timing split: wall-clock includes prefill. Decode rate here
-        // is an upper bound on latency; streaming gives the clean number.
+        // Same definition as the Ollama path takes without a stream: tokens over the
+        // client's wall clock, prefill included. Use `--stream` for a decode rate.
         let completion_tok_s = if wall_ms > 0.0 && completion_tokens > 0 {
             Some(completion_tokens as f64 / (wall_ms / 1000.0))
         } else {
