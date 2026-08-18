@@ -7,13 +7,13 @@
 #
 # Usage:
 #   scripts/vllm-serve-hf.sh Qwen/Qwen3-8B-AWQ
-#   scripts/vllm-serve-hf.sh Qwen/Qwen3-8B-AWQ --name qwen3:8b   # match an ollama tag so one llmbench sweep hits both
+#   scripts/vllm-serve-hf.sh Qwen/Qwen3-8B-AWQ --name qwen3:8b   # match an ollama tag so one assay sweep hits both
 #   scripts/vllm-serve-hf.sh Qwen/Qwen3-8B-FP8 --gpu 1 --tp 1 --max-len 8192
 #   scripts/vllm-serve-hf.sh meta-llama/... -- --quantization fp8   # pass extra vllm args after --
 #
 # Notes:
 #   * Weights auto-download to the HF cache on first serve (HF_HOME below).
-#   * --name sets --served-model-name so `llmbench --models <that>` matches the
+#   * --name sets --served-model-name so `assay --models <that>` matches the
 #     /v1/models id (use the ollama tag to compare the same logical model).
 #   * vLLM auto-detects AWQ/GPTQ/FP8 from config.json; override with -- --quantization.
 #   * For a model that needs >1 GPU (won't fit 16GB), use --tp 2 (and free GPU0).
@@ -52,7 +52,7 @@ done
 [[ -n "$NAME" ]] || NAME="$REPO"
 
 echo "  HF repo    : $REPO"
-echo "  Served as  : $NAME   (llmbench --models '$NAME')"
+echo "  Served as  : $NAME   (assay --models '$NAME')"
 echo "  Serving on : GPU$GPU  tp=$TP  port $PORT  max-len $MAXLEN  gpu-mem $GMU"
 echo "  HF cache   : $HF_HOME"
 echo
