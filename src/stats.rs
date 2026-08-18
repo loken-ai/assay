@@ -14,6 +14,9 @@ pub struct Stats {
     pub count: usize,
 }
 
+/// Below this many samples a P95 is the maximum with a percentile's name on it.
+const P95_MIN_SAMPLES: usize = 20;
+
 impl Stats {
     /// Compute stats from a slice of values. Returns None if empty.
     pub fn compute(label: &str, unit: &str, values: &[f64]) -> Option<Self> {
@@ -29,8 +32,16 @@ impl Stats {
         };
         let stddev = variance.sqrt();
 
-        let mut sorted = values.to_vec();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        // A NaN anywhere makes partial_cmp incomparable, and a sort that treats it as Equal
+        // leaves min, max and the percentiles reading whatever position it landed in. Drop
+        // non-finite values instead: a divide-by-near-zero upstream should cost one sample,
+        // not corrupt the four order statistics silently.
+        let mut sorted: Vec<f64> = values.iter().copied().filter(|v| v.is_finite()).collect();
+        if sorted.is_empty() {
+            return None;
+        }
+        sorted.sort_by(|a, b| a.partial_cmp(b).expect("non-finite values filtered above"));
+        let n = sorted.len();
 
         let min = sorted[0];
         let max = sorted[n - 1];
@@ -127,6 +138,14 @@ pub fn print_table(
     println!("  {}", thin);
 
     for s in stats {
+        // A P95 over a handful of points is the maximum wearing a percentile's name: at n=3
+        // the interpolation lands 90% of the way from the middle value to the largest. Print
+        // the sample count instead, so nobody reads three runs as a tail estimate.
+        let p95 = if s.count >= P95_MIN_SAMPLES {
+            s.fmt_val(s.p95)
+        } else {
+            format!("n={}", s.count)
+        };
         println!(
             "  {:<22} {:>10} {:>10} {:>10} {:>10} {:>10}",
             s.label,
@@ -134,7 +153,7 @@ pub fn print_table(
             format!("+/-{}", s.fmt_val(s.stddev)),
             s.fmt_val(s.min),
             s.fmt_val(s.max),
-            s.fmt_val(s.p95),
+            p95,
         );
     }
     println!("  {}", border);
@@ -158,18 +177,51 @@ pub fn print_comparison(label_a: &str, stats_a: &[Stats], label_b: &str, stats_b
     println!("  {}", thin);
 
     for sa in stats_a {
-        if let Some(sb) = stats_b.iter().find(|s| s.label == sa.label) {
+        let Some(sb) = stats_b.iter().find(|s| s.label == sa.label) else {
+            // Printed with a dash rather than dropped. A table that silently omits the rows
+            // where one side has no data is indistinguishable from one that chose them.
+            println!(
+                "  {:<22} {:>16} {:>16} {:>10}",
+                sa.label,
+                sa.fmt_val(sa.p50),
+                "—",
+                "—"
+            );
+            continue;
+        };
+        {
+            // Compared on the MEDIAN, not the mean. These are three to five runs on a machine
+            // that also schedules, pages and thermally throttles; one stall moves a mean of
+            // three by a third and flips the verdict. The median is already computed.
+            let (a, b) = (sa.p50, sb.p50);
+            // A count is not a rate and has no faster side. Tokens generated is the clearest
+            // case: 128 against 64 is not a 100% win, it is two runs that produced different
+            // amounts of work and are therefore not comparable at all.
+            if sa.unit == "count" {
+                println!(
+                    "  {:<22} {:>16} {:>16} {:>10}",
+                    sa.label,
+                    sa.fmt_val(a),
+                    sb.fmt_val(b),
+                    if (a - b).abs() < f64::EPSILON {
+                        "="
+                    } else {
+                        "differ"
+                    }
+                );
+                continue;
+            }
             let speedup = if sa.unit == "tok/s" {
                 // Higher is better for throughput
-                if sa.mean > 0.0 {
-                    (sb.mean / sa.mean - 1.0) * 100.0
+                if a > 0.0 {
+                    (b / a - 1.0) * 100.0
                 } else {
                     0.0
                 }
             } else {
-                // Lower is better for latency/time
-                if sb.mean > 0.0 {
-                    (sa.mean / sb.mean - 1.0) * 100.0
+                // Lower is better for latency, time and energy
+                if b > 0.0 {
+                    (a / b - 1.0) * 100.0
                 } else {
                     0.0
                 }

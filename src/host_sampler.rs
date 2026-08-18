@@ -13,6 +13,10 @@ use tokio::task::JoinHandle;
 pub struct HostSample {
     /// comm names matched (e.g. "server", "ollama")
     pub procs: Vec<String>,
+    /// Peak resident + swapped memory, in MB. Named for RSS because that is what it is
+    /// mostly made of, but the swapped pages are counted too: a process pushed to swap has
+    /// not stopped needing that memory, and reporting only what stayed resident would make
+    /// a machine under pressure look frugal.
     pub rss_peak_mb: u64,
     pub rss_avg_mb: u64,
     pub swap_peak_mb: u64,

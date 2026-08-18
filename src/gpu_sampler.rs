@@ -19,6 +19,10 @@ use tokio::task::JoinHandle;
 pub struct GpuSample {
     pub gpu_index: u32,
     pub gpu_name: String,
+    /// Peak VRAM in use on the DEVICE, in MB — not by the engine. NVML reports what every
+    /// process plus the driver holds, so anything else resident on the card is inside this
+    /// number. The benchmark protocol stops the other engines for that reason; on a shared
+    /// machine, read it as an upper bound.
     pub vram_peak_mb: u64,
     pub vram_avg_mb: u64,
     pub util_peak_pct: u32,

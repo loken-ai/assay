@@ -258,6 +258,12 @@ struct Args {
     #[arg(long, default_value_t = energy::DEFAULT_CARBON_INTENSITY)]
     carbon_intensity: f64,
 
+    /// Process names to weigh for the host-footprint columns, comma-separated. The default
+    /// covers the three engines this tool drives; vLLM runs as `python`, so a list that omits
+    /// it reports a footprint for two engines and none for the third.
+    #[arg(long, value_delimiter = ',', default_values_t = ["server".to_string(), "ollama".to_string(), "python".to_string(), "vllm".to_string()])]
+    host_proc_names: Vec<String>,
+
     /// Sample idle (no-request) power for this many seconds at startup and record it in the
     /// JSON output as `idle_energy_baseline`. It is NOT subtracted from the reported figures:
     /// every J/token here includes the machine's idle draw, and this is the number to subtract
@@ -734,6 +740,7 @@ async fn main() {
                         image_b64.as_deref(),
                         &args.require_substr,
                         args.session_id.as_deref(),
+                        &args.host_proc_names,
                     )
                     .await;
                     all_cells.push(cell);
@@ -964,6 +971,7 @@ async fn run_cell<'a>(
     images: Option<&[String]>,
     require_substr: &[String],
     session_id: Option<&str>,
+    host_proc_names: &[String],
 ) -> CellResult<'a> {
     let mode = if stream { "streaming" } else { "non-streaming" };
 
@@ -1115,7 +1123,12 @@ async fn run_cell<'a>(
             None
         };
         // Host footprint of the engine processes (RSS/swap/CPU via /proc).
-        let host_sampler = HostSampler::start(gpu_interval_ms.max(200), &["server", "ollama"]);
+        // Which processes to weigh. vLLM runs as python, so it was never matched and its
+        // host footprint column came back empty while the other two reported one — an
+        // asymmetry that reads as a finding. "server" is also generic enough to catch an
+        // unrelated process, so the list is settable.
+        let host_names: Vec<&str> = host_proc_names.iter().map(String::as_str).collect();
+        let host_sampler = HostSampler::start(gpu_interval_ms.max(200), &host_names);
         // Energy/carbon window (NVML energy counter + RAPL). Spans the whole
         // request including prefill; per-token energy uses tokens_generated.
         let energy_sampler = if energy_measure {
