@@ -1,4 +1,4 @@
-# llmbench
+# assay
 
 Benchmark a local inference server against another one, on the same prompts and the same
 clock. It drives [Ollama](https://ollama.com), [LOKEN](https://github.com/loken-ai/loken)
@@ -6,7 +6,7 @@ and vLLM through their own APIs, sweeps models, context lengths and prompt sizes
 what each of them actually did rather than what it claims.
 
 ```sh
-llmbench --ollama http://localhost:11434 --loken http://localhost:11435 \
+assay --ollama http://localhost:11434 --loken http://localhost:11435 \
          --models qwen3:latest --num-ctx 4096 --prompts short,medium,long
 ```
 
@@ -30,7 +30,7 @@ difference between engines hides:
 ## Build
 
 ```sh
-cargo build --release      # target/release/llmbench
+cargo build --release      # target/release/assay
 ```
 
 No GPU or model is needed to build it. The GPU sampler reads NVML at run time when a card is

@@ -5,10 +5,10 @@
 //!
 //! Usage:
 //!   # Single model, single context, default prompts
-//!   llmbench --ollama 11434 --loken 11435 --models qwen3:latest --stream
+//!   assay --ollama 11434 --loken 11435 --models qwen3:latest --stream
 //!
 //!   # Full sweep with JSON + CSV output
-//!   llmbench --ollama 11434 --loken 11435 \
+//!   assay --ollama 11434 --loken 11435 \
 //!       --models qwen3:latest,devstral-small-2:latest \
 //!       --num-ctx 2048,4096 --stream -n 3 \
 //!       -o sweep.json --output-csv sweep.csv
@@ -110,7 +110,7 @@ fn builtin_prompt(name: &str) -> Option<&'static str> {
 // CLI -------------------------------------------------------------------------
 
 #[derive(Parser)]
-#[command(name = "llmbench")]
+#[command(name = "assay")]
 #[command(
     about = "Inference server benchmark — compare Ollama vs LOKEN across models, contexts, and prompts"
 )]
@@ -1214,13 +1214,18 @@ async fn run_cell<'a>(
                 all_energy.push(energy_window);
             }
             Err(e) => {
+                // Record nothing for a failed iteration. The four vectors are read positionally
+                // — j_per_tok zips energy against tokens_generated — so a slot pushed here
+                // without a matching `all_metrics` entry does not "keep alignment", it shifts
+                // every later window onto the wrong request's token count. A failure has no
+                // token count to pair with, and its window covers a request that did not run
+                // to completion, so it belongs in neither.
                 eprintln!("    #{}: ERROR -- {}", i + 1, e);
-                all_gpu_samples.push(gpu_summary); // keep slot alignment
-                all_host_samples.push(host_summary);
-                all_energy.push(energy_window);
             }
         }
     }
+    debug_assert_eq!(all_metrics.len(), all_gpu_samples.len(), "gpu samples desynchronised");
+    debug_assert_eq!(all_metrics.len(), all_host_samples.len(), "host samples desynchronised");
 
     // Coherence gate. If --require-substr was set, each iteration's preview
     // must contain at least one required substring (case-insensitive). A
@@ -1321,50 +1326,24 @@ async fn run_cell<'a>(
     if let Some(s) = Stats::compute("ITL (per token)", "ms", &all_itl) {
         stats.push(s);
     }
-    // Energy metrics. Pair each iteration's energy window with its token count
-    // (windows align 1:1 with all_metrics — both pushed in the same Ok arm).
-    let j_per_tok: Vec<f64> = all_metrics
-        .iter()
-        .zip(all_energy.iter())
-        .filter_map(|(m, e)| {
-            e.as_ref()
-                .and_then(|w| w.j_per_tok(m.tokens_generated.unwrap_or(0)))
-        })
-        .collect();
+    // Energy metrics. Every one pairs a window with the token count of the SAME iteration,
+    // through `per_token`, which refuses to pair at all when the two sides have drifted apart.
+    let j_per_tok = per_token(&all_metrics, &all_energy, |w, t| w.j_per_tok(t));
     if let Some(s) = Stats::compute("Energy J/tok", "J", &j_per_tok) {
         stats.push(s);
     }
-    // Decode-phase J/tok (prefill excluded) — the honest cross-engine energy metric.
-    let j_per_decode_tok: Vec<f64> = all_metrics
-        .iter()
-        .zip(all_energy.iter())
-        .filter_map(|(m, e)| {
-            e.as_ref()
-                .and_then(|w| w.j_per_decode_tok(m.tokens_generated.unwrap_or(0)))
-        })
-        .collect();
+    // Decode-phase J/tok (prefill excluded) — the cross-engine energy metric.
+    let j_per_decode_tok = per_token(&all_metrics, &all_energy, |w, t| w.j_per_decode_tok(t));
     if let Some(s) = Stats::compute("Energy decode J/tok", "J", &j_per_decode_tok) {
         stats.push(s);
     }
-    let wh_per_tok: Vec<f64> = all_metrics
-        .iter()
-        .zip(all_energy.iter())
-        .filter_map(|(m, e)| {
-            e.as_ref()
-                .and_then(|w| w.wh_per_tok(m.tokens_generated.unwrap_or(0)))
-        })
-        .collect();
+    let wh_per_tok = per_token(&all_metrics, &all_energy, |w, t| w.wh_per_tok(t));
     if let Some(s) = Stats::compute("Energy Wh/tok", "Wh", &wh_per_tok) {
         stats.push(s);
     }
-    let gco2_per_tok: Vec<f64> = all_metrics
-        .iter()
-        .zip(all_energy.iter())
-        .filter_map(|(m, e)| {
-            e.as_ref()
-                .and_then(|w| w.gco2_per_tok(m.tokens_generated.unwrap_or(0), carbon_intensity))
-        })
-        .collect();
+    let gco2_per_tok = per_token(&all_metrics, &all_energy, |w, t| {
+        w.gco2_per_tok(t, carbon_intensity)
+    });
     if let Some(s) = Stats::compute("Carbon gCO2/tok", "g", &gco2_per_tok) {
         stats.push(s);
     }

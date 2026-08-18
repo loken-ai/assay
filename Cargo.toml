@@ -1,9 +1,9 @@
 [package]
-name = "llmbench"
+name = "assay"
 version = "0.1.0"
 edition = "2021"
 description = "Benchmark a local inference server against another, on the same prompts and the same clock"
-repository = "https://github.com/loken-ai/loken-bench"
+repository = "https://github.com/loken-ai/assay"
 license = "MIT OR Apache-2.0"
 keywords = ["llm", "benchmark"]
 categories = ["command-line-utilities"]
