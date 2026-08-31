@@ -147,12 +147,16 @@ gpu_policy_banner
 COMMON=(--warmup 0 --carbon-intensity 50)
 [ "${STREAM:-1}" = 1 ] && COMMON+=(--stream)
 
-# CPU thermal fairness: the two engines run back-to-back, so without a gate the
-# SECOND engine starts on a hotter package and clocks lower — a measurable
-# ordering bias on long CPU runs (the engine measured first runs on a colder machine, which
-# recommends gating on the real package temp, not blind sleeps). Wait for the CPU
-# package to fall below COOL_C (default 45°C) before each engine's CPU run so both
-# measure cool-vs-cool. GPU mode: no-op. Cap the wait so a hot box still finishes.
+# Thermal fairness: the two engines run back-to-back, so without a gate the SECOND engine
+# starts on a hotter part and clocks lower — a measurable ordering bias (the engine measured
+# first runs on a colder machine, which recommends gating on a real thermometer, not blind
+# sleeps). Both modes gate, on the part that does the work: the CPU package, or the hottest
+# card. Cap the wait so a hot box still finishes.
+#
+# The GPU threshold is not a number chosen here. A card that idles at 46°C would never pass a
+# fixed 45, and one that idles at 28 would pass while still 15° above its own floor. So the
+# floor is measured once, before anything runs, and each gate waits for the cards to come back
+# within GPU_COOL_MARGIN_C of it.
 # The package sensor is found by TYPE, because the zone NUMBER differs per machine and a
 # hardcoded one silently reads someone else's thermometer — or nothing at all.
 _discover_pkg_temp() {
@@ -165,16 +169,46 @@ _discover_pkg_temp() {
   return 1
 }
 PKG_TEMP_SENSOR="${PKG_TEMP_SENSOR:-$(_discover_pkg_temp || true)}"   # milli-°C, may be empty
+
+# Hottest card, in whole °C. Empty when there is no nvidia-smi to ask.
+_gpu_hottest_c() {
+  nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits 2>/dev/null \
+    | sort -rn | head -1
+}
+# The idle floor, read before any engine starts. A campaign that begins on hot cards records a
+# floor it can meet, which is the honest failure: the gate then admits it is gating on a warm
+# machine rather than pretending the reading means what it does on a cold one.
+GPU_IDLE_C="${GPU_IDLE_C:-$(_gpu_hottest_c)}"
+[ -n "${GPU_IDLE_C:-}" ] && echo "  🌡 gpu idle floor ${GPU_IDLE_C}°C" >&2
+
 cool_wait() {
-  [ "$BENCH_MODE" = cpu ] || return 0
-  [ -r "$PKG_TEMP_SENSOR" ] || return 0
-  local thr_mc=$(( ${COOL_C:-45} * 1000 )) t
-  for _ in $(seq 1 120); do            # ≤120 s cap
-    t=$(cat "$PKG_TEMP_SENSOR" 2>/dev/null || echo 0)
-    [ "$t" -le "$thr_mc" ] && { echo "  🌡 pkg $((t/1000))°C ≤ ${COOL_C:-45}°C — proceeding" >&2; return 0; }
+  local t
+  if [ "$BENCH_MODE" = cpu ]; then
+    [ -r "$PKG_TEMP_SENSOR" ] || return 0
+    local thr_mc=$(( ${COOL_C:-45} * 1000 ))
+    for _ in $(seq 1 120); do            # ≤120 s cap
+      t=$(cat "$PKG_TEMP_SENSOR" 2>/dev/null || echo 0)
+      [ "$t" -le "$thr_mc" ] && { echo "  🌡 pkg $((t/1000))°C ≤ ${COOL_C:-45}°C — proceeding" >&2; return 0; }
+      sleep 2
+    done
+    echo "  🌡 pkg still $((t/1000))°C after cap — proceeding anyway" >&2
+    return 0
+  fi
+
+  [ -n "${GPU_IDLE_C:-}" ] || return 0
+  # 8°C rather than a tighter band: the trade is between an ordering bias and a campaign that
+  # does not finish. Below about 4 the wait dominates the measurement on a full matrix; above
+  # about 12 the second engine measurably starts warmer than the first.
+  local thr=$(( GPU_IDLE_C + ${GPU_COOL_MARGIN_C:-8} ))
+  # Longer cap than the CPU gate: a card sheds heat through a much smaller radiator than a
+  # tower cooler, and a 70°C card takes minutes rather than seconds to come back.
+  for _ in $(seq 1 300); do            # ≤600 s cap
+    t=$(_gpu_hottest_c)
+    [ -z "$t" ] && return 0
+    [ "$t" -le "$thr" ] && { echo "  🌡 gpu ${t}°C ≤ ${thr}°C — proceeding" >&2; return 0; }
     sleep 2
   done
-  echo "  🌡 pkg still $((t/1000))°C after cap — proceeding anyway" >&2
+  echo "  🌡 gpu still ${t}°C after cap (floor ${GPU_IDLE_C}°C) — proceeding anyway" >&2
 }
 
 kill_all() {
@@ -261,7 +295,17 @@ E_BIN[loken]="$LOKEN_ABS"; E_ARGS[loken]="serve --models-dir $MODELS_DIR --keep-
 # looks for ./config.toml first, so the working directory silently decides which configuration
 # is measured — and a different memory fraction is a different per-card budget, hence a
 # different placement for any model near the boundary.
-E_CWD[loken]="$(cd "$HERE/.." && pwd)"
+#
+# Derived from the BINARY, not from this script. The harness lives in its own checkout, so
+# taking its own parent measured an engine that read no configuration at all: a 70B fell from
+# 18.7 to 4.3 tok/s with ten layers on the host and six gigabytes free on the cards, and
+# nothing in the output said so. The refusal below is the part that makes it impossible to
+# publish that number twice.
+E_CWD[loken]="$(cd "$(dirname "$LOKEN_ABS")/../.." && pwd)"
+[ -f "${E_CWD[loken]}/config.toml" ] || {
+  echo "no config.toml in ${E_CWD[loken]} - refusing to measure an engine that would read its defaults" >&2
+  exit 2
+}
 E_PROBE[loken]="http://127.0.0.1:$LOKEN_PORT/api/version"; E_WAIT[loken]=60
 
 # vLLM is launched through a wrapper because its own flags differ per source (an HF repo or a
