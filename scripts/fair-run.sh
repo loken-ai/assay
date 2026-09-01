@@ -221,6 +221,11 @@ kill_all() {
   # command line merely MENTIONS these words (e.g. a wrapper doing its own
   # cleanup) and silently kill it mid-run — bit us repeatedly on 2026-07-02.
   pkill -9 -x llama-server 2>/dev/null || true
+  # The engine under test, by the name its binary actually carries. `server` is what that
+  # binary was called before it was renamed, so this line killed nothing for months: the
+  # server survived every cell, stayed a child of the run that started it, and the harness
+  # sat in wait() with one cell measured and seventeen sweeps to go.
+  pkill -9 -x "$(basename "${LOKEN_BIN:-lokend}")" 2>/dev/null || true
   pkill -9 -x server 2>/dev/null || true
   pkill -9 -f 'bin/vllm serve' 2>/dev/null || true
   pkill -9 -f 'VLLM::EngineCore' 2>/dev/null || true
