@@ -197,13 +197,22 @@ pub struct IterationMetrics {
     pub prompt_tok_s: Option<f64>,
     /// Completion throughput (tok/s)
     pub completion_tok_s: Option<f64>,
-    /// Decode time per generated token (ms). Server-reported
-    /// eval_duration / eval_count. This is the length-invariant
-    /// per-token decode rate — DOES NOT depend on prompt length or
-    /// num_predict ceiling. Use this for fair cross-server comparison
-    /// when models have different EOS behavior (chat-tuned models
-    /// where one server generates to the cap and another stops at EOS).
+    /// Decode time per generated token (ms), the inverse of `completion_tok_s`.
+    ///
+    /// It is that and nothing else. This field once documented itself as the
+    /// server's eval_duration / eval_count and as length-invariant; it never
+    /// held that, and a reader who believed the comment read a client-observed
+    /// rate as a server-side one.
     pub decode_ms_per_token: Option<f64>,
+    /// The same rate as the SERVER reports it: eval_count / eval_duration.
+    ///
+    /// `None` for engines that publish no prefill/decode split, vLLM among them,
+    /// which is why the headline rate is the client-observed one - scoring two
+    /// engines by their own bookkeeping and a third by the clock would compare
+    /// the bookkeeping. This is recorded beside it so the two can be seen to
+    /// disagree: at 2 ms a token the client's read loop costs as much as the
+    /// token, and only having both makes that visible.
+    pub server_decode_tok_s: Option<f64>,
     /// End-to-end latency (ms) from server
     pub e2e_latency_ms: f64,
     /// Tokens generated (server's eval_count — includes template/control tokens).
@@ -691,6 +700,10 @@ impl BenchClient {
         let load_time_ms = body.load_duration.map(|ns| ns as f64 / 1_000_000.0);
 
         Ok(IterationMetrics {
+            server_decode_tok_s: match (body.eval_count, body.eval_duration) {
+                (Some(c), Some(d)) if d > 0 => Some(c as f64 / (d as f64 / 1e9)),
+                _ => None,
+            },
             wall_clock_ms: wall_ms,
             load_time_ms,
             ttft_ms,
@@ -887,6 +900,13 @@ impl BenchClient {
                 })
         });
         let decode_ms_per_token = completion_tok_s.map(|t| 1000.0 / t);
+        let server_decode_tok_s =
+            last_response
+                .as_ref()
+                .and_then(|b| match (b.eval_count, b.eval_duration) {
+                    (Some(c), Some(d)) if d > 0 => Some(c as f64 / (d as f64 / 1e9)),
+                    _ => None,
+                });
 
         let ttft_ms = last_response
             .as_ref()
@@ -915,6 +935,7 @@ impl BenchClient {
             .and_then(|b| b.load_duration.map(|ns| ns as f64 / 1e6));
 
         Ok(IterationMetrics {
+            server_decode_tok_s,
             wall_clock_ms: wall_ms,
             load_time_ms,
             ttft_ms,
@@ -1004,6 +1025,8 @@ impl BenchClient {
         };
 
         Ok(IterationMetrics {
+            // The OpenAI surface publishes no prefill/decode split.
+            server_decode_tok_s: None,
             wall_clock_ms: wall_ms,
             load_time_ms: None,
             ttft_ms: None,
@@ -1134,6 +1157,8 @@ impl BenchClient {
         let decode_ms_per_token = completion_tok_s.map(|t| 1000.0 / t);
 
         Ok(IterationMetrics {
+            // The OpenAI surface publishes no prefill/decode split.
+            server_decode_tok_s: None,
             wall_clock_ms: wall_ms,
             load_time_ms: None,
             ttft_ms: first_chunk_time,

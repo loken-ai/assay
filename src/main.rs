@@ -1605,6 +1605,10 @@ fn save_json(path: &str, args: &Args, cells: &[CellResult], idle_energy: Option<
                         "prompt_tokens": m.prompt_tokens,
                         "prompt_tok_s": m.prompt_tok_s,
                         "completion_tok_s": m.completion_tok_s,
+                        // Beside the client-observed rate, not instead of it: the headline
+                        // stays uniform across engines, and a cell where the two disagree
+                        // can now be told from one where they do not.
+                        "server_decode_tok_s": m.server_decode_tok_s,
                         "e2e_latency_ms": m.e2e_latency_ms,
                         "tokens_generated": m.tokens_generated,
                         "inter_token_latencies_ms": m.inter_token_latencies_ms,
