@@ -332,12 +332,67 @@ struct CellResult<'a> {
 /// units collapses. Real prose and real code both sit far above the threshold - the
 /// separation is not delicate, which matters because a false accusation of garbage is
 /// worse than the gap it closes.
+/// A literal `<0xHH>` byte-fallback piece left in the generated text.
+fn has_literal_byte_piece(text: &str) -> bool {
+    let b = text.as_bytes();
+    b.windows(3).enumerate().any(|(i, w)| {
+        w == b"<0x"
+            && b.get(i + 3).is_some_and(u8::is_ascii_hexdigit)
+            && b.get(i + 4).is_some_and(u8::is_ascii_hexdigit)
+            && b.get(i + 5) == Some(&b'>')
+    })
+}
+
+/// A `0x` run of at least four whole bytes that spell printable ASCII.
+///
+/// Four bytes rather than two: `0x4142` is short enough to appear in a real answer about
+/// encodings, and the observed damage was never shorter than four.
+fn spells_ascii_in_hex(text: &str) -> bool {
+    let b = text.as_bytes();
+    for i in 0..b.len().saturating_sub(2) {
+        if &b[i..i + 2] != b"0x" {
+            continue;
+        }
+        let mut j = i + 2;
+        while j < b.len() && b[j].is_ascii_hexdigit() {
+            j += 1;
+        }
+        let digits = &b[i + 2..j];
+        if digits.len() < 8 || !digits.len().is_multiple_of(2) {
+            continue;
+        }
+        let spells_text = digits.chunks(2).all(|pair| {
+            std::str::from_utf8(pair)
+                .ok()
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+                .is_some_and(|v| (0x20..=0x7e).contains(&v))
+        });
+        if spells_text {
+            return true;
+        }
+    }
+    false
+}
+
 fn looks_degenerate(text: &str) -> bool {
     // Undecodable bytes. gemma4:31b answered "kingdom" then 50 replacement characters and
     // the first version of this check passed it: they are all DISTINCT as units, so a
     // distinct-ratio sees variety where there is only damage.
     let chars = text.chars().count();
     if chars >= 20 && text.chars().filter(|c| *c == '\u{FFFD}').count() * 10 > chars {
+        return true;
+    }
+    // Byte-fallback tokens that reached the text instead of being assembled into the
+    // bytes they stand for. ernie4-5 was published at +124.5% decode and +240.3% energy
+    // on 2026-09-02 while writing "a man named 0x7465653b" where ollama wrote prose -
+    // those four bytes are "tee;". Every check in this function saw an ordinary answer,
+    // because ordinary prose is exactly what surrounds the damage.
+    //
+    // Two shapes, and they need different rules. A literal `<0xHH>` piece is never
+    // something a model means to say, so it is damage on sight. A bare `0x` run is not -
+    // `0xDEADBEEF` is a constant any code answer may carry - so that one counts only when
+    // the bytes it spells are printable text, which a real constant's are not.
+    if has_literal_byte_piece(text) || spells_ascii_in_hex(text) {
         return true;
     }
     let units: Vec<&str> = text.split_whitespace().collect();
@@ -1801,7 +1856,33 @@ mod pairing_tests {
 
 #[cfg(test)]
 mod coherence_tests {
-    use super::looks_degenerate;
+    use super::{has_literal_byte_piece, looks_degenerate, spells_ascii_in_hex};
+
+    /// The gate must fire on a byte run that was rendered instead of assembled, and stay
+    /// silent on the hex a code answer legitimately carries. Both halves are the point:
+    /// the first is the ernie4-5 cell this was written for, the second is what stops the
+    /// rule from accusing the `long` prompt, which is a code review.
+    #[test]
+    fn it_recognises_rendered_byte_tokens_and_leaves_real_hex_alone() {
+        // ernie4-5, verbatim from the campaign's recorded preview.
+        assert!(looks_degenerate(
+            "man named \n0x7465653b, who was a knight in shining armor. He had a son named \
+             0x7465653c, and they lived together in the kingdom of 0x7465653d. The king loved \
+             him very much and gave him a lot of land for his inheritance."
+        ));
+        // The other shape: the piece itself, unassembled.
+        assert!(has_literal_byte_piece("a line<0x0A>and the next"));
+        // A constant spells bytes that are not text, so it is not damage.
+        assert!(!spells_ascii_in_hex(
+            "the sentinel is 0xDEADBEEF and the mask 0xFFFFFFFF"
+        ));
+        assert!(!looks_degenerate(
+            "The function masks the header with 0xDEADBEEF before hashing it, which keeps the \
+             low bits stable across runs and makes the test reproducible on both machines."
+        ));
+        // Too short to tell an encoding example from damage.
+        assert!(!spells_ascii_in_hex("the byte pair 0x4142 spells AB"));
+    }
 
     /// The check has to fire on what was actually observed, and stay silent on what a
     /// working model writes. A gate that cannot do both is worse than none: it either
