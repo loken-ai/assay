@@ -132,6 +132,12 @@ struct Args {
     /// LOKEN URL (e.g., http://host:11435)
     #[arg(long)]
     loken: Option<String>,
+    /// What the LOKEN target is called in the results. The default is the engine; a campaign
+    /// measuring the same engine in another configuration - a drafter attached, say - names
+    /// it here so the report can keep the two apart in one row. "LOKEN+llama3.2:1b" is read
+    /// by bench_row.py as "loken 0.1.0 + llama3.2:1b".
+    #[arg(long, default_value = "LOKEN")]
+    loken_label: String,
 
     /// vLLM URL or port (OpenAI-compatible /v1 API, e.g. 8000 or
     /// http://host:8000). The model is fixed at `vllm serve` launch — the
@@ -525,7 +531,7 @@ async fn main() {
     }
     if let Some(ref url) = args.loken {
         targets.push(ServerTarget {
-            label: "LOKEN".into(),
+            label: args.loken_label.clone(),
             url: normalize_url(url),
             protocol: Protocol::Ollama,
         });

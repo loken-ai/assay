@@ -306,7 +306,10 @@ E_BIN[loken]="$LOKEN_ABS"; E_ARGS[loken]="serve --models-dir $MODELS_DIR --keep-
 # 18.7 to 4.3 tok/s with ten layers on the host and six gigabytes free on the cards, and
 # nothing in the output said so. The refusal below is the part that makes it impossible to
 # publish that number twice.
-E_CWD[loken]="$(cd "$(dirname "$LOKEN_ABS")/../.." && pwd)"
+# The engine reads ./config.toml from where it starts. LOKEN_CWD points it at another one -
+# a variant arm of a campaign, the same binary with a drafter named - without touching the
+# configuration in the tree that every other cell is measured with.
+E_CWD[loken]="${LOKEN_CWD:-$(cd "$(dirname "$LOKEN_ABS")/../.." && pwd)}"
 [ -f "${E_CWD[loken]}/config.toml" ] || {
   echo "no config.toml in ${E_CWD[loken]} - refusing to measure an engine that would read its defaults" >&2
   exit 2
@@ -346,6 +349,9 @@ if [ "$BENCH_MODE" = gpu ] && [ -n "$GPU_PIN" ]; then
     fi
   done
 fi
+# LOKEN_ONLY=1 measures this engine alone. A variant arm already has its peers' rows from the
+# plain arm of the same cell, and measuring them again would only warm the room.
+if [ -z "${LOKEN_ONLY:-}" ]; then
 for _att in 1 2 3; do
   kill_all
   echo "▶ ollama (default params)${_att:+ [try $_att]} …"
@@ -375,6 +381,7 @@ for _att in 1 2 3; do
   "$ASSAY" --ollama http://127.0.0.1:$OLLAMA_PORT "${NUMGPU[@]}" "${COMMON[@]}" "$@" -o "$TMP/ollama.json" || true
   break
 done
+fi
 if [ -f "$TMP/ollama.json" ]; then PARTS+=("$TMP/ollama.json"); fi
 
 # ── 2. LOKEN, isolated ───────────────────────────────────────────────────────
@@ -386,7 +393,7 @@ cool_wait
 if [ -f "$TMP/loken.json" ]; then PARTS+=("$TMP/loken.json"); fi
 
 # ── 3. vLLM, isolated (GPU only, when requested) ─────────────────────────────
-if [ "$BENCH_MODE" = gpu ] && [ -n "${VLLM_SERVE:-}" ]; then
+if [ "$BENCH_MODE" = gpu ] && [ -n "${VLLM_SERVE:-}" ] && [ -z "${LOKEN_ONLY:-}" ]; then
   kill_all
   echo "▶ vLLM: $VLLM_SERVE …"
   # Which wrapper depends on where the weights come from; its own index flag stays because
