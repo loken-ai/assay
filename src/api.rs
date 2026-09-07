@@ -1,6 +1,6 @@
 //! Minimal API client for benchmarking. Speaks two protocols:
-//!   * `Protocol::Ollama` — Ollama-native `/api/generate` NDJSON (Ollama, LOKEN).
-//!   * `Protocol::OpenAI` — OpenAI-compatible `/v1/completions` SSE (vLLM).
+//!   * `Protocol::Ollama` - Ollama-native `/api/generate` NDJSON (Ollama, LOKEN).
+//!   * `Protocol::OpenAI` - OpenAI-compatible `/v1/completions` SSE (vLLM).
 //!
 //! Only the types and methods needed for generate, load and unload.
 
@@ -16,12 +16,12 @@ pub enum Protocol {
     /// template; server reports nanosecond prefill/decode durations.
     Ollama,
     /// OpenAI-compatible `/v1/completions` (vLLM). Raw prompt completion (no
-    /// chat template — matches the Ollama raw path for apples-to-apples decode
+    /// chat template - matches the Ollama raw path for apples-to-apples decode
     /// comparison). The model is fixed at server launch: there is no load /
     /// unload / pull lifecycle, and `num_ctx` is set via `--max-model-len` when
     /// the server starts, so per-request `num_ctx` is ignored. The OpenAI
     /// completions API reports no prefill/decode split, so decode rate is
-    /// derived from wall-clock minus TTFT — use `--stream` for fair numbers.
+    /// derived from wall-clock minus TTFT - use `--stream` for fair numbers.
     OpenAI,
 }
 
@@ -46,7 +46,7 @@ pub struct GenerateRequest {
     /// Without it a reasoning model can return an empty `response` with its output routed
     /// to the thinking channel instead, which reads as a broken cell rather than a
     /// configuration one. `think` is ollama's field, `thinking` is LOKEN's; each engine
-    /// ignores the other's, so both end up emitting content → fair comparison.
+    /// ignores the other's, so both end up emitting content -> fair comparison.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub think: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -127,7 +127,7 @@ impl GenerateResponse {
 
 /// OpenAI text-completion request (POST /v1/completions). We use the raw
 /// completions endpoint (not /v1/chat/completions) so no chat template is
-/// applied — matching the Ollama `/api/generate` raw path for a fair decode
+/// applied - matching the Ollama `/api/generate` raw path for a fair decode
 /// comparison on the continuation-style bench prompts.
 #[derive(Debug, Clone, Serialize)]
 struct OpenAiCompletionRequest {
@@ -215,14 +215,14 @@ pub struct IterationMetrics {
     pub server_decode_tok_s: Option<f64>,
     /// End-to-end latency (ms) from server
     pub e2e_latency_ms: f64,
-    /// Tokens generated (server's eval_count — includes template/control tokens).
+    /// Tokens generated (server's eval_count - includes template/control tokens).
     pub tokens_generated: Option<u64>,
     /// Non-empty content chunks received via streaming. Differs from
     /// `tokens_generated` for chat-template-leaking models (gemma4/qwen3
     /// emit `<start_of_turn>`/`<end_of_turn>`/`model:` template tokens that
     /// have empty response content but count toward server's eval_count).
     /// When tokens_generated >> content_tokens, the model is wasting cycles
-    /// on template tokens — bench tok/s based on tokens_generated is
+    /// on template tokens - bench tok/s based on tokens_generated is
     /// CORRECT (real decode work) but the user-visible output is short.
     pub content_tokens: Option<u64>,
     /// Inter-token latencies in ms (gap between consecutive non-empty chunks).
@@ -233,7 +233,7 @@ pub struct IterationMetrics {
     /// both produce an ordinary token rate and only the text tells them apart.
     pub response_preview: Option<String>,
     /// Client wall-clock time (ms, from request start) of the first generated
-    /// token. Marks the prefill→decode boundary so the energy sampler can
+    /// token. Marks the prefill->decode boundary so the energy sampler can
     /// isolate decode-phase energy (excluding prefill). Streaming only.
     pub first_token_wall_ms: Option<f64>,
 }
@@ -430,14 +430,14 @@ impl BenchClient {
         Ok(())
     }
 
-    /// Ensure a model is available — pull it if not found.
+    /// Ensure a model is available - pull it if not found.
     pub async fn ensure_model(&self, model: &str) -> Result<(), String> {
         if self.model_exists(model).await {
             return Ok(());
         }
         // vLLM serves exactly the model it was launched with; the bench can't
         // pull or swap it. A miss means the server is down or serving a
-        // different model — surface that rather than attempting an /api/pull.
+        // different model - surface that rather than attempting an /api/pull.
         if self.protocol == Protocol::OpenAI {
             return Err(format!(
                 "vLLM target at {} is not serving '{}' (start it with `vllm serve {}`)",
@@ -450,7 +450,7 @@ impl BenchClient {
 
     /// Query /api/ps for the list of models currently loaded on this server.
     /// Returns an empty list if the endpoint is unreachable or returns a
-    /// non-JSON body — never an error, since this is best-effort cleanup.
+    /// non-JSON body - never an error, since this is best-effort cleanup.
     pub async fn loaded_models(&self) -> Vec<String> {
         let url = format!("{}/api/ps", self.base_url);
         let resp = match self.http.get(&url).send().await {
@@ -496,7 +496,7 @@ impl BenchClient {
             Ok(r) => {
                 let status = r.status();
                 let text = r.text().await.unwrap_or_default();
-                // 404 is fine — model wasn't loaded
+                // 404 is fine - model wasn't loaded
                 if status.as_u16() == 404 {
                     Ok(())
                 } else {
@@ -577,8 +577,8 @@ impl BenchClient {
         opts.insert("num_predict".into(), serde_json::Value::from(max_tokens));
         // Greedy decode for benchmarking: deterministic, reproducible, and it
         // measures pure decode speed. Without an explicit temperature each
-        // engine falls back to its own default and runs the full sampling path — softmax,
-        // top-k/top-p, multinomial — whose cost differs per implementation and lands inside
+        // engine falls back to its own default and runs the full sampling path - softmax,
+        // top-k/top-p, multinomial - whose cost differs per implementation and lands inside
         // the decode rate. Temperature 0 is argmax everywhere, which removes that term from
         // the comparison instead of averaging three different ones.
         opts.insert("temperature".into(), serde_json::Value::from(0.0));
@@ -597,7 +597,7 @@ impl BenchClient {
     }
 
     /// Run a single generate request and return metrics. `images` is an optional
-    /// slice of base64-encoded JPEGs/PNGs (no `data:` prefix) — vision models
+    /// slice of base64-encoded JPEGs/PNGs (no `data:` prefix) - vision models
     /// only. For text-only models pass `None`.
     pub async fn generate(
         &self,
@@ -669,7 +669,7 @@ impl BenchClient {
         if let Some(err) = body.as_server_error() {
             return Err(format!("server error: {}", err));
         }
-        // Completed response with zero generated tokens is also a failure — the server
+        // Completed response with zero generated tokens is also a failure - the server
         // said "done" without emitting anything. Empty prompt requests (used for load/unload)
         // hit a different code path and don't go through this function.
         if body.done && body.eval_count.unwrap_or(0) == 0 && body.response.is_empty() {
@@ -677,7 +677,7 @@ impl BenchClient {
         }
 
         // Extract metrics from response (all durations in nanoseconds)
-        // No stream, no client-observed first token — and vLLM reports none either.
+        // No stream, no client-observed first token - and vLLM reports none either.
         let ttft_ms = None;
         let prompt_tokens = body.prompt_eval_count;
         let prompt_tok_s = match (body.prompt_eval_count, body.prompt_eval_duration) {
@@ -686,7 +686,7 @@ impl BenchClient {
         };
         // Without a stream there is no client-side first-token time, so no engine can offer
         // a decode-only rate the others can match. The reported figure is therefore tokens
-        // over the client's wall clock — prefill included — on every engine alike, which is
+        // over the client's wall clock - prefill included - on every engine alike, which is
         // the only definition all three can satisfy. It is not a decode rate, and `--stream`
         // is what produces one; the server's own split is kept below as a diagnostic.
         let completion_tok_s = match body.eval_count {
@@ -694,7 +694,7 @@ impl BenchClient {
             _ => None,
         };
         // Length-invariant only where the server reports the split, so it is not part of the
-        // cross-engine comparison — vLLM has no equivalent to compare it against.
+        // cross-engine comparison - vLLM has no equivalent to compare it against.
         let decode_ms_per_token = None;
         let e2e_latency_ms = wall_ms;
         let load_time_ms = body.load_duration.map(|ns| ns as f64 / 1_000_000.0);
@@ -836,7 +836,7 @@ impl BenchClient {
                     }
                     // Content first: a chunk carrying response/thinking text is a
                     // token even if that text contains `"done":true`. The terminal
-                    // stats line always has an EMPTY response → done branch.
+                    // stats line always has an EMPTY response -> done branch.
                     if has_nonempty_field(l, "\"response\":\"")
                         || has_nonempty_field(l, "\"thinking\":\"")
                     {
@@ -855,7 +855,7 @@ impl BenchClient {
                         }
                     } else if l.contains("\"done\":true") || l.contains("\"done\": true") {
                         last_done_line = Some(l.to_string());
-                        break; // generation complete — don't wait on EOF / keep-alive
+                        break; // generation complete - don't wait on EOF / keep-alive
                     }
                 }
                 let wall_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -913,7 +913,7 @@ impl BenchClient {
             .and_then(|b| b.prompt_eval_duration.map(|ns| ns as f64 / 1e6));
         // Reported TTFT is the CLIENT's time to the first chunk, on every engine. The
         // server's prefill duration excludes queueing, scheduling and the HTTP hop, and
-        // vLLM reports no equivalent — comparing one against the other measures the
+        // vLLM reports no equivalent - comparing one against the other measures the
         // bookkeeping rather than the engines.
         let _server_prefill_ms = ttft_ms;
         let ttft_ms = first_chunk_time;
@@ -956,7 +956,7 @@ impl BenchClient {
 
     /// Non-streaming OpenAI completion. The completions API reports token
     /// counts (`usage`) but no prefill/decode timing split, so decode rate is
-    /// derived from wall-clock (which still includes prefill — prefer
+    /// derived from wall-clock (which still includes prefill - prefer
     /// `generate_stream_openai` / `--stream` for a fair decode number).
     async fn generate_openai(
         &self,
@@ -1045,7 +1045,7 @@ impl BenchClient {
 
     /// Streaming OpenAI completion (SSE). Measures real TTFT (time to first
     /// content chunk) and derives the decode rate from generation-only
-    /// wall-clock (wall − TTFT), mirroring the Ollama streaming fallback so the
+    /// wall-clock (wall - TTFT), mirroring the Ollama streaming fallback so the
     /// two protocols are compared on the same length-invariant basis. Token
     /// counts come from the final `usage` chunk (`stream_options.include_usage`).
     async fn generate_stream_openai(
@@ -1150,7 +1150,7 @@ impl BenchClient {
         if completion_tokens == 0 {
             return Err("vLLM streaming returned 0 tokens".to_string());
         }
-        // UNIFORM decode rate — identical definition to the Ollama-protocol path
+        // UNIFORM decode rate - identical definition to the Ollama-protocol path
         // (first-to-last generated token, client-side), so vLLM is measured by
         // exactly the same criterion as Ollama and LOKEN.
         let completion_tok_s = steady_decode_tok_s(&token_times_ms);
@@ -1177,12 +1177,12 @@ impl BenchClient {
 }
 
 /// Take the first ~120 chars of a model's output and squash whitespace.
-/// Used only for the per-cell coherence preview — never affects metrics.
+/// Used only for the per-cell coherence preview - never affects metrics.
 fn truncate_preview(s: &str) -> String {
     let collapsed: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
     let trimmed: String = collapsed.chars().take(120).collect();
     if collapsed.chars().count() > 120 {
-        format!("{trimmed}…")
+        format!("{trimmed}...")
     } else {
         trimmed
     }
@@ -1194,7 +1194,7 @@ fn truncate_preview(s: &str) -> String {
 /// server-reported timing field, so every engine is judged by the same clock rather than by
 /// its own bookkeeping, and it excludes prefill/TTFT by starting the
 /// clock at the first token. Accuracy depends on the read loop not throttling
-/// the stream — hence the lean reader in `generate_stream`.
+/// the stream - hence the lean reader in `generate_stream`.
 fn steady_decode_tok_s(token_times_ms: &[f64]) -> Option<f64> {
     if token_times_ms.len() < 2 {
         return None;

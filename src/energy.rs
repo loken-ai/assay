@@ -1,32 +1,32 @@
 //! Energy over a request window, and what that number does and does not contain.
 //!
-//! WHAT IS MEASURED. Not the engine's consumption — the machine's, over the window the request
+//! WHAT IS MEASURED. Not the engine's consumption - the machine's, over the window the request
 //! occupies. NVML sums every device present, not the one the model ran on; RAPL returns whole
 //! CPU packages, which includes the operating system, this process and its own samplers. The
 //! idle floor is not subtracted, so a slower engine is charged for occupying the machine
 //! longer, and part of every J/token figure is `idle_power / throughput`.
 //!
 //! That makes it a whole-system measurement on a quiet machine, which is a legitimate and
-//! common methodology — it is roughly what MLPerf Power does — and a meaningless one on a box
+//! common methodology - it is roughly what MLPerf Power does - and a meaningless one on a box
 //! doing anything else. Benchmark on an idle machine or do not quote the joules.
 //!
 //! WHAT IT COVERS, BY PLATFORM. `domains_counted` records which of gpu / cpu_pkg / dram
 //! actually contributed, and it is not the same everywhere:
 //!
-//! - **GPU** — NVML's `total_energy_consumption` counter, or power draw integrated over the
+//! - **GPU** - NVML's `total_energy_consumption` counter, or power draw integrated over the
 //!   window when the counter is absent. Works wherever NVML does, Windows included.
-//! - **CPU** — Intel RAPL package energy from the `energy_uj` counters under
+//! - **CPU** - Intel RAPL package energy from the `energy_uj` counters under
 //!   /sys/class/powercap. **Linux only.** The same counters exist elsewhere, but in MSRs that
 //!   only ring 0 can read: no userspace path without a kernel driver, and Intel's supported
 //!   route, Power Gadget, was discontinued in 2023.
-//! - **DRAM** — the RAPL `dram` subdomain, where the platform exposes one. Same Linux limit.
+//! - **DRAM** - the RAPL `dram` subdomain, where the platform exposes one. Same Linux limit.
 //!
 //! So a Windows run counts the GPU alone and its J/token is mechanically lower than a Linux
 //! run of the same work. The two are different quantities; the reported labels say which, so
 //! they are not subtracted from one another by accident.
 //!
 //! Wraparound on the RAPL counters is handled (see `rapl_delta_j`). If the counters are
-//! unreadable — no permission, no hardware, wrong platform — the window is still reported,
+//! unreadable - no permission, no hardware, wrong platform - the window is still reported,
 //! the missing domain is absent from `domains_counted`, and `note` says why. To grant access
 //! on Linux without running as root:
 //!
@@ -40,7 +40,7 @@ use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 
 /// Default grid carbon intensity (gCO2eq / kWh). A documented global-average
-/// placeholder — only affects the *absolute* gCO2/token number, not the J/token
+/// placeholder - only affects the *absolute* gCO2/token number, not the J/token
 /// ranking (CI is a common multiplicative factor across engines). Override with
 /// `--carbon-intensity` for your region (e.g. France ~50, world avg ~480,
 /// coal-heavy grid ~800).
@@ -52,7 +52,7 @@ pub const DEFAULT_CARBON_INTENSITY: f64 = 480.0;
 pub enum GpuEnergyPath {
     /// NVML `nvmlDeviceGetTotalEnergyConsumption` monotonic counter (preferred).
     NvmlCounter,
-    /// Integrated `power.draw` (P·dt) sampled at ~10 Hz (fallback).
+    /// Integrated `power.draw` (P*dt) sampled at ~10 Hz (fallback).
     PowerIntegration,
     /// No GPU energy available (no NVML, no GPU).
     None,
@@ -69,7 +69,7 @@ pub struct EnergyWindow {
     pub dram_energy_j: f64,
     /// Total counted energy = sum of the available domains (J).
     pub energy_j: f64,
-    /// Window duration (s) — for cross-checking against power.
+    /// Window duration (s) - for cross-checking against power.
     pub duration_s: f64,
     /// Which GPU path produced `gpu_energy_j`.
     pub gpu_path: GpuEnergyPath,
@@ -82,7 +82,7 @@ pub struct EnergyWindow {
     pub domains_counted: Vec<String>,
     /// Note explaining any unavailable domain (e.g. RAPL needs root).
     pub note: Option<String>,
-    /// GPU energy over the DECODE phase only (J) — the window from the first
+    /// GPU energy over the DECODE phase only (J) - the window from the first
     /// generated token to the end, excluding prefill. `None` when no decode
     /// boundary was supplied or the time-series was empty. This is the honest
     /// per-token decode energy: it is immune to the prompt-cache confound (an
@@ -95,7 +95,7 @@ pub struct EnergyWindow {
     pub dram_decode_j: Option<f64>,
     /// Total counted decode-phase energy (J) = sum of available decode domains.
     pub decode_energy_j: Option<f64>,
-    /// Decode-phase duration (s) = window end − first-token time.
+    /// Decode-phase duration (s) = window end - first-token time.
     pub decode_duration_s: Option<f64>,
 }
 
@@ -114,18 +114,18 @@ impl EnergyWindow {
     }
 
     /// Carbon per generated token (gCO2eq/tok) for the given grid intensity
-    /// (gCO2/kWh). gCO2/tok = Wh/tok × CI / 1000.
+    /// (gCO2/kWh). gCO2/tok = Wh/tok x CI / 1000.
     pub fn gco2_per_tok(&self, tokens: u64, carbon_intensity: f64) -> Option<f64> {
         self.wh_per_tok(tokens)
             .map(|wh| wh * carbon_intensity / 1000.0)
     }
 
     /// Decode-phase energy per generated token (J/tok), excluding prefill.
-    /// Prefer this over `j_per_tok` for any cross-engine comparison — `tokens`
+    /// Prefer this over `j_per_tok` for any cross-engine comparison - `tokens`
     /// is the decode token count, and the energy excludes the prefill the cache confound
     /// lives in.
     ///
-    /// None when there is no split to report — which is every non-streamed request, since the
+    /// None when there is no split to report - which is every non-streamed request, since the
     /// boundary is the client's first-token time and there is none. It used to fall back to
     /// the full window instead, so a row labelled "decode" carried prefill energy and read as
     /// the confound-free figure it exists to replace. An absent row says that plainly.
@@ -167,7 +167,7 @@ fn read_u128(path: &std::path::Path) -> Option<u128> {
 }
 
 /// Discover all RAPL package + dram domains under /sys/class/powercap.
-/// Returns (domains, readable) — `readable` is false if energy_uj exists but is
+/// Returns (domains, readable) - `readable` is false if energy_uj exists but is
 /// permission-denied (the root-only mitigation).
 fn discover_rapl() -> (Vec<RaplDomain>, bool) {
     let base = std::path::Path::new("/sys/class/powercap");
@@ -177,7 +177,7 @@ fn discover_rapl() -> (Vec<RaplDomain>, bool) {
     let Ok(entries) = std::fs::read_dir(base) else {
         return (domains, false);
     };
-    // Top-level packages look like intel-rapl:0, intel-rapl:1, …
+    // Top-level packages look like intel-rapl:0, intel-rapl:1, ...
     for e in entries.flatten() {
         let name = e.file_name();
         let name = name.to_string_lossy();
@@ -193,7 +193,7 @@ fn discover_rapl() -> (Vec<RaplDomain>, bool) {
             &mut any_eacces,
             &mut any_readable,
         );
-        // Sub-domains intel-rapl:N:M — look for one named "dram".
+        // Sub-domains intel-rapl:N:M - look for one named "dram".
         if let Ok(subs) = std::fs::read_dir(&pkg_dir) {
             for s in subs.flatten() {
                 let sname = s.file_name();
@@ -249,7 +249,7 @@ fn push_domain(
     });
 }
 
-/// Read all domains' current energy (µJ). None entries are domains that failed.
+/// Read all domains' current energy (uJ). None entries are domains that failed.
 fn rapl_snapshot(domains: &[RaplDomain]) -> Vec<Option<u128>> {
     domains
         .iter()
@@ -289,7 +289,7 @@ fn rapl_delta_j(
 
 // --- NVML GPU energy ----------------------------------------------------------
 
-/// Sum of per-device total-energy counters (mJ → J). Returns None if NVML or
+/// Sum of per-device total-energy counters (mJ -> J). Returns None if NVML or
 /// the energy counter is unavailable (so the caller can fall back to power).
 fn nvml_energy_snapshot_j() -> Option<f64> {
     use nvml_wrapper::Nvml;
@@ -351,7 +351,7 @@ pub struct EnergySampler {
 
 impl EnergySampler {
     /// Begin a measurement window. `power_interval_ms` is the fallback
-    /// power-integration sample period (~100ms = 10 Hz) — only used if the NVML
+    /// power-integration sample period (~100ms = 10 Hz) - only used if the NVML
     /// energy counter is unavailable.
     pub fn start(power_interval_ms: u64) -> Self {
         let start_instant = Instant::now();
@@ -372,7 +372,7 @@ impl EnergySampler {
             (None, None)
         };
 
-        // Cumulative time-series for the prefill/decode split — only meaningful on
+        // Cumulative time-series for the prefill/decode split - only meaningful on
         // the NVML-counter path (deterministic monotonic energy). One NVML init
         // is reused across ticks; RAPL is re-snapshotted each tick.
         let trace = Arc::new(Mutex::new(Vec::new()));
@@ -414,9 +414,9 @@ impl EnergySampler {
 
     /// Close the window and compute the energy summary. `decode_start_s` is the
     /// wall-clock time (from window start) of the first generated token; when
-    /// supplied, the decode-phase energy (first token → end) is computed from the
+    /// supplied, the decode-phase energy (first token -> end) is computed from the
     /// time-series, excluding prefill. Pass `None` (or on the power-integration
-    /// fallback) to skip the split — full-window energy is always reported.
+    /// fallback) to skip the split - full-window energy is always reported.
     pub async fn stop(mut self, decode_start_s: Option<f64>) -> EnergyWindow {
         let duration_s = self.start_instant.elapsed().as_secs_f64();
 
@@ -435,7 +435,7 @@ impl EnergySampler {
             // exactly 0 J: a plausible small number, indistinguishable from a genuinely
             // idle GPU, that drags the whole J/token figure down by an order of magnitude
             // with nothing in the output to say a read was lost. Report no GPU domain
-            // instead — an absent column is visible, a wrong one is not.
+            // instead - an absent column is visible, a wrong one is not.
             match nvml_energy_snapshot_j() {
                 Some(end_j) => ((end_j - start_j).max(0.0), GpuEnergyPath::NvmlCounter),
                 None => (0.0, GpuEnergyPath::None),
@@ -488,7 +488,7 @@ impl EnergySampler {
         let note = build_note(&self.rapl_domains, self.rapl_readable, gpu_path);
 
         // Decode-phase split: energy consumed AFTER the first token. cum_at(t)
-        // linearly interpolates the cumulative trace; decode = full − cum_at(t0).
+        // linearly interpolates the cumulative trace; decode = full - cum_at(t0).
         let (gpu_decode_j, cpu_pkg_decode_j, dram_decode_j, decode_energy_j, decode_duration_s) =
             match decode_start_s {
                 Some(t0) if !trace.is_empty() && t0 < duration_s => {
@@ -609,7 +609,7 @@ fn energy_trace_loop(
     }
 }
 
-/// Sum the per-device NVML total-energy counters (mJ → J) using an existing
+/// Sum the per-device NVML total-energy counters (mJ -> J) using an existing
 /// handle (no re-init). Returns None if no device exposes the counter.
 fn nvml_counter_sum_j(nvml: &nvml_wrapper::Nvml) -> Option<f64> {
     let count = nvml.device_count().ok()?;
@@ -649,7 +649,7 @@ fn build_note(
     let have_rapl_files = !domains.is_empty();
     if have_rapl_files && !rapl_readable {
         parts.push(
-            "CPU RAPL unavailable (needs root): energy_uj is permission-denied — \
+            "CPU RAPL unavailable (needs root): energy_uj is permission-denied - \
              run as root or `sudo chmod a+r /sys/class/powercap/intel-rapl:*/energy_uj`"
                 .to_string(),
         );
@@ -657,7 +657,7 @@ fn build_note(
         // Say WHY, because the reason decides whether the reader can do anything about it.
         // On Linux a missing powercap tree is a kernel/hardware question. Everywhere else it
         // is structural: the RAPL counters exist, but they live in MSRs that only ring 0 can
-        // read, so a userspace tool cannot reach them without shipping a kernel driver —
+        // read, so a userspace tool cannot reach them without shipping a kernel driver -
         // which a benchmark has no business installing. Intel's own Power Gadget, the
         // supported way to do it, was discontinued in 2023.
         if cfg!(target_os = "linux") {
@@ -683,7 +683,7 @@ fn build_note(
     }
 }
 
-/// Integrate GPU `power.draw` (P·dt) over a window. Used only when the NVML
+/// Integrate GPU `power.draw` (P*dt) over a window. Used only when the NVML
 /// energy counter is unavailable. Sums every CUDA device.
 fn power_integrate_loop(stop: Arc<AtomicBool>, interval_ms: u64) -> f64 {
     use nvml_wrapper::Nvml;
@@ -698,7 +698,7 @@ fn power_integrate_loop(stop: Arc<AtomicBool>, interval_ms: u64) -> f64 {
     let interval = Duration::from_millis(interval_ms.max(10));
     let mut energy_j = 0.0;
     let mut last = Instant::now();
-    // Trapezoid-ish: use the dt since the previous sample × instantaneous power.
+    // Trapezoid-ish: use the dt since the previous sample x instantaneous power.
     while !stop.load(Ordering::Relaxed) {
         std::thread::sleep(interval);
         let dt = last.elapsed().as_secs_f64();
@@ -742,7 +742,7 @@ mod tests {
         };
         assert!((w.j_per_tok(60).unwrap() - 0.6).abs() < 1e-9);
         assert!((w.wh_per_tok(60).unwrap() - 0.6 / 3600.0).abs() < 1e-12);
-        // gCO2/tok at CI=480: 1.6667e-4 Wh × 480 / 1000 = 8.0e-5 g.
+        // gCO2/tok at CI=480: 1.6667e-4 Wh x 480 / 1000 = 8.0e-5 g.
         let g = w.gco2_per_tok(60, 480.0).unwrap();
         assert!((g - (0.6 / 3600.0) * 480.0 / 1000.0).abs() < 1e-12);
     }
@@ -775,7 +775,7 @@ mod tests {
         assert!((base.j_per_decode_tok(60).unwrap() - 0.4).abs() < 1e-9);
         assert!((base.j_per_tok(60).unwrap() - 2.0).abs() < 1e-9);
 
-        // No split available — every non-streamed request, since the boundary is the
+        // No split available - every non-streamed request, since the boundary is the
         // client's first-token time. It must NOT fall back to the full window: that put
         // prefill energy under a label saying "decode", which is the confound this metric
         // exists to remove. An absent row is honest; a mislabelled one is not.
@@ -837,7 +837,7 @@ mod tests {
         let start = vec![Some(900u128)];
         let end = vec![Some(100u128)];
         let (pkg, _dram) = rapl_delta_j(&dom, &start, &end);
-        // (1000 - 900) + 100 = 200 µJ = 2.0e-4 J
+        // (1000 - 900) + 100 = 200 uJ = 2.0e-4 J
         assert!((pkg - 200.0 / 1_000_000.0).abs() < 1e-12);
     }
 
@@ -849,7 +849,7 @@ mod tests {
             kind: RaplKind::Dram,
         }];
         let (_pkg, dram) = rapl_delta_j(&dom, &[Some(1_000_000u128)], &[Some(3_000_000u128)]);
-        // 2_000_000 µJ = 2.0 J
+        // 2_000_000 uJ = 2.0 J
         assert!((dram - 2.0).abs() < 1e-9);
     }
 }

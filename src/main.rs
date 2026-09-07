@@ -1,6 +1,6 @@
-//! LLM Benchmark — compare Ollama vs LOKEN performance
+//! LLM Benchmark - compare Ollama vs LOKEN performance
 //!
-//! Sweeps over models × num_ctx × prompts and reports per-token streaming
+//! Sweeps over models x num_ctx x prompts and reports per-token streaming
 //! metrics + per-GPU sampling for each combination.
 //!
 //! Usage:
@@ -42,7 +42,7 @@ the first general-purpose computer design. The next major milestone was";
 
 // Vision prompts (used with --image). Short captioning at three lengths so
 // per-cell prefill/decode comparisons mirror the text suite shape. The
-// "Once upon a time" continuation style doesn't apply — vision models
+// "Once upon a time" continuation style doesn't apply - vision models
 // always condition on the image, so direct instructions work better.
 const PROMPT_VISION_SHORT: &str = "Describe this image.";
 const PROMPT_VISION_MEDIUM: &str = "Describe this image in detail. Mention the subjects, what they \
@@ -50,7 +50,7 @@ appear to be doing, the setting, and any notable objects or background elements.
 const PROMPT_VISION_LONG: &str = "Provide a thorough, paragraph-length description of this image. \
 Cover (1) the people or main subjects and what they are doing, (2) the environment and setting, \
 (3) clothing, colors, and visible objects, (4) the mood or atmosphere, and (5) any interactions \
-between subjects or with the environment. Be specific and concrete rather than abstract — describe \
+between subjects or with the environment. Be specific and concrete rather than abstract - describe \
 what you actually see rather than what it might mean. Use complete sentences and write at least \
 six sentences.";
 
@@ -88,7 +88,7 @@ handling for malformed input. For each issue, show a corrected snippet.";
 // The `2.5k` prompt: a long single request that fills the KV cache while asking for the
 // same completion length as the other cells, so the column isolates decode-rate falloff as
 // KV grows rather than mixing in a different output size. The text is a technical article on
-// processor architecture followed by comprehension questions — long, ordinary English prose,
+// processor architecture followed by comprehension questions - long, ordinary English prose,
 // chosen because it tokenises the way real input does. Kept in-tree rather than passed by
 // path, so a run is reproducible from the repository alone.
 const PROMPT_2_5K: &str = include_str!("../prompts/p2_5k.txt");
@@ -121,7 +121,7 @@ fn builtin_prompt(name: &str) -> Option<&'static str> {
 #[derive(Parser)]
 #[command(name = "assay")]
 #[command(
-    about = "Inference server benchmark — compare Ollama vs LOKEN across models, contexts, and prompts"
+    about = "Inference server benchmark - compare Ollama vs LOKEN across models, contexts, and prompts"
 )]
 #[command(version)]
 struct Args {
@@ -140,7 +140,7 @@ struct Args {
     loken_label: String,
 
     /// vLLM URL or port (OpenAI-compatible /v1 API, e.g. 8000 or
-    /// http://host:8000). The model is fixed at `vllm serve` launch — the
+    /// http://host:8000). The model is fixed at `vllm serve` launch - the
     /// bench can't pull/swap it, and `num_ctx` is set via the server's
     /// `--max-model-len` (per-request num_ctx is ignored). Use `--stream` for
     /// a fair decode rate (the OpenAI API reports no prefill/decode split).
@@ -159,14 +159,14 @@ struct Args {
     #[arg(long, value_delimiter = ',', default_values_t = vec![4096usize])]
     num_ctx: Vec<usize>,
 
-    /// Force Ollama's `num_gpu` (layers offloaded to GPU). Ollama-only — the other engines
+    /// Force Ollama's `num_gpu` (layers offloaded to GPU). Ollama-only - the other engines
     /// never receive it, and are put on the CPU by how they were launched instead. Which
     /// cards each engine may use is decided at launch, not here: see scripts/gpu-policy.sh.
     #[arg(long)]
     num_gpu: Option<usize>,
 
     /// Comma-separated list of prompt names. Text suite: short, medium, long
-    /// (the default). Vision suite: vision_short, vision_medium, vision_long —
+    /// (the default). Vision suite: vision_short, vision_medium, vision_long -
     /// require --image to be passed too.
     #[arg(long, value_delimiter = ',', default_values_t = vec!["short".to_string(), "medium".to_string(), "long".to_string()])]
     prompts: Vec<String>,
@@ -174,7 +174,7 @@ struct Args {
     /// Give every iteration a prompt no engine has seen, by prefixing a counter.
     ///
     /// Engines reuse a computed prefix, so replaying one prompt measures that cache rather
-    /// than the prefill — the figure that comes back is a cache hit wearing a rate's units.
+    /// than the prefill - the figure that comes back is a cache hit wearing a rate's units.
     /// Use this whenever the prefill number is the point.
     #[arg(long)]
     pub unique_prompt: bool,
@@ -212,7 +212,7 @@ struct Args {
 
     /// Compare current run against a previous bench JSON. Per-cell
     /// completion_tok_s deltas printed at the end. Warns if model
-    /// fingerprints differ between runs (model was re-pulled — the
+    /// fingerprints differ between runs (model was re-pulled - the
     /// "regression" is then a different set of weights, not different code).
     #[arg(long)]
     baseline: Option<String>,
@@ -233,13 +233,13 @@ struct Args {
     #[arg(long, default_value = "100")]
     gpu_sample_interval_ms: u64,
 
-    /// Verbose output — show HTTP requests/responses
+    /// Verbose output - show HTTP requests/responses
     #[arg(short, long)]
     verbose: bool,
 
     /// Path to an image file to attach to every iteration. When set, the
     /// image is base64-encoded once at startup and shipped in the
-    /// `images[]` field of every /api/generate call — required for vision
+    /// `images[]` field of every /api/generate call - required for vision
     /// models (moondream, llava, etc). Without this flag, vision prompts
     /// run without an image and the model responds based on text alone.
     #[arg(long)]
@@ -317,7 +317,7 @@ struct CellResult<'a> {
     load_time_ms: Option<f64>,
     stats: Vec<Stats>,
     /// First-iteration response preview shown after the cell completes. Used
-    /// for the coherence check by eye — a fast answer and a fast wrong answer have the
+    /// for the coherence check by eye - a fast answer and a fast wrong answer have the
     /// same rate, and only the text separates them.
     first_response_preview: Option<String>,
     /// Coherence pass/fail flag. Always set when the cell produced text: a
@@ -480,7 +480,7 @@ async fn main() {
 
     // Load + base64-encode the image once at startup (if --image was given).
     // We hold base64 in memory across the entire sweep so per-iteration
-    // latency only includes the HTTP send — decoding the file per iteration would add
+    // latency only includes the HTTP send - decoding the file per iteration would add
     // variance that has nothing to do with the model.
     let image_b64: Option<Vec<String>> = match args.image.as_deref() {
         Some(path) => {
@@ -505,7 +505,7 @@ async fn main() {
                                        \x20  cold image prefill, which measures the first-token\n  \
                                        \x20  outlier rather than the steady state. Passing an id\n  \
                                        \x20  enables prefix-KV reuse on engines that implement it\n  \
-                                       \x20  — and on those alone, so the run is then no longer\n  \
+                                       \x20  - and on those alone, so the run is then no longer\n  \
                                        \x20  a like-for-like comparison.\n"
                         );
                     }
@@ -544,7 +544,7 @@ async fn main() {
         });
     }
 
-    // vLLM reports no prefill/decode timing split — without --stream the decode
+    // vLLM reports no prefill/decode timing split - without --stream the decode
     // rate is wall-clock-inflated by prefill. Warn so a non-stream vLLM run
     // isn't misread as a loss.
     if !args.stream && targets.iter().any(|t| t.protocol == Protocol::OpenAI) {
@@ -646,7 +646,7 @@ async fn main() {
     };
 
     // Pre-flight: ensure every model exists on every target. Models that fail
-    // are recorded in `failed_models` and skipped during the sweep — we don't
+    // are recorded in `failed_models` and skipped during the sweep - we don't
     // abort the entire run because of one missing model.
     use std::collections::HashSet;
     let mut failed_models: HashSet<(usize, String)> = HashSet::new();
@@ -663,7 +663,7 @@ async fn main() {
         }
     }
 
-    // Run the sweep: target → model → num_ctx → prompt
+    // Run the sweep: target -> model -> num_ctx -> prompt
     let mut all_cells: Vec<CellResult> = Vec::new();
 
     for (idx, target) in targets.iter().enumerate() {
@@ -675,7 +675,7 @@ async fn main() {
             // Cross-unload EVERY currently-loaded model on every server. We
             // query /api/ps to get the actually-loaded list (rather than just
             // iterating over args.models) because the previous bench step or
-            // an external client may have left a different model resident —
+            // an external client may have left a different model resident -
             // and a leaked model competes for VRAM with the current subject.
             for (j, other) in targets.iter().enumerate() {
                 let mut ok = 0usize;
@@ -705,7 +705,7 @@ async fn main() {
             // Wait for VRAM to actually drop before loading the next
             // model. An unload request can return before the memory is actually back:
             // the runner process holding it exits on its own schedule. Polling is more
-            // reliable than a fixed sleep — without this, the next
+            // reliable than a fixed sleep - without this, the next
             // model loads into a contended VRAM and falls back to CPU.
             // Skipped for vLLM: its model is resident for the server's
             // lifetime, so there is nothing to wait on (and it would never
@@ -728,17 +728,17 @@ async fn main() {
                         }
                         if poll == 29 {
                             println!(
-                                "  [vram-wait] GPU0 still at {}MB after 30s — proceeding anyway",
+                                "  [vram-wait] GPU0 still at {}MB after 30s - proceeding anyway",
                                 mb
                             );
                         }
                     } else {
-                        break; // nvidia-smi not available — fall through
+                        break; // nvidia-smi not available - fall through
                     }
                 }
             }
 
-            // Load model once for this (target, model) — we keep it loaded
+            // Load model once for this (target, model) - we keep it loaded
             // across all (num_ctx, prompt) cells since num_ctx is per-request.
             // vLLM has no load step (model resident at server launch); we only
             // confirm the server is reachable and serving this model.
@@ -850,7 +850,7 @@ async fn main() {
     }
 
     // Per (model, num_ctx, prompt) comparison across targets
-    // Pairwise, so a three-engine sweep is not silently left without any comparison at all —
+    // Pairwise, so a three-engine sweep is not silently left without any comparison at all -
     // which is what a bare `== 2` did, on the very run this tool exists for.
     for (i, a) in targets.iter().enumerate() {
         for b in targets.iter().skip(i + 1) {
@@ -866,7 +866,7 @@ async fn main() {
         save_csv(path, &all_cells);
     }
 
-    // Baseline comparison — verify model identity, then compute per-cell deltas.
+    // Baseline comparison - verify model identity, then compute per-cell deltas.
     if let Some(ref path) = args.baseline {
         compare_to_baseline(path, &all_cells);
     }
@@ -875,7 +875,7 @@ async fn main() {
 /// Compare current bench results against a previously-saved JSON.
 /// Matches cells by (target.label, model, num_ctx, prompt). Per-cell
 /// completion_tok_s delta printed. Warns loudly if model fingerprint
-/// differs — that's drift, not a code regression.
+/// differs - that's drift, not a code regression.
 fn compare_to_baseline(path: &str, cells: &[CellResult]) {
     println!();
     println!("=== Baseline comparison vs {} ===", path);
@@ -917,7 +917,7 @@ fn compare_to_baseline(path: &str, cells: &[CellResult]) {
         let m = match matched {
             Some(m) => m,
             None => {
-                println!("  [{}] NO BASELINE — skipping", cell_key);
+                println!("  [{}] NO BASELINE - skipping", cell_key);
                 continue;
             }
         };
@@ -953,14 +953,14 @@ fn compare_to_baseline(path: &str, cells: &[CellResult]) {
             (Some(cur), Some(base)) => {
                 let delta_pct = ((cur - base) / base) * 100.0;
                 let arrow = if delta_pct > 1.0 {
-                    "↑"
+                    "+"
                 } else if delta_pct < -1.0 {
-                    "↓"
+                    "-"
                 } else {
                     "="
                 };
                 println!(
-                    "  {} [{}] {} {:.1} → {:.1} tok/s  ({:+.1}%)",
+                    "  {} [{}] {} {:.1} -> {:.1} tok/s  ({:+.1}%)",
                     arrow,
                     cell_key,
                     if drift { "(DRIFT)" } else { "" },
@@ -974,8 +974,8 @@ fn compare_to_baseline(path: &str, cells: &[CellResult]) {
     }
     if drift_warned {
         println!();
-        println!("  NOTE: Some cells had model fingerprint drift — those deltas are NOT");
-        println!("  code-vs-code comparisons — the weights themselves differ between runs.");
+        println!("  NOTE: Some cells had model fingerprint drift - those deltas are NOT");
+        println!("  code-vs-code comparisons - the weights themselves differ between runs.");
     }
 }
 
@@ -983,7 +983,7 @@ fn compare_to_baseline(path: &str, cells: &[CellResult]) {
 ///
 /// The pairing is positional, so it is checked rather than trusted. Both vectors are filled in
 /// one arm of one match and nowhere else; if that ever stops being true, every figure derived
-/// here would be a real window divided by a different request's tokens — arithmetic that looks
+/// here would be a real window divided by a different request's tokens - arithmetic that looks
 /// entirely plausible and is wrong. Length drift yields nothing and says so, because a missing
 /// energy column is a visible problem and a wrong one is not.
 fn per_token(
@@ -993,7 +993,7 @@ fn per_token(
 ) -> Vec<f64> {
     if metrics.len() != energy.len() {
         eprintln!(
-            "    ⚠️  {} iterations against {} energy windows — per-token energy withheld for this cell",
+            "    ⚠️  {} iterations against {} energy windows - per-token energy withheld for this cell",
             metrics.len(),
             energy.len()
         );
@@ -1037,7 +1037,7 @@ async fn run_cell<'a>(
 
     // Warmup (no GPU sampling, results discarded). If warmup hits TWO
     // consecutive failures the model is likely in a half-failed state
-    // from the prior cell (typical after VRAM contention) — unload +
+    // from the prior cell (typical after VRAM contention) - unload +
     // reload it once before continuing so subsequent cells see fresh
     // state rather than cascading errors.
     if warmup > 0 {
@@ -1162,7 +1162,7 @@ async fn run_cell<'a>(
     //
     // Iterations deliberately do not unload between themselves. Models are isolated from one
     // another at the perimeter, and unloading per iteration forces a cold cache on every
-    // measured run — which inflates exactly the variance the isolation exists to control.
+    // measured run - which inflates exactly the variance the isolation exists to control.
     for i in (0..iterations).take_while(|_| concurrency <= 1) {
         // A prefix no engine holds, so the prefill is computed rather than recalled. The
         // counter goes in FRONT: a shared prefix with a different tail would still hit.
@@ -1181,10 +1181,10 @@ async fn run_cell<'a>(
         };
         // Host footprint of the engine processes (RSS/swap/CPU via /proc).
         // Which processes to weigh. vLLM runs as python, so it was never matched and its
-        // host footprint column came back empty while the other two reported one — an
+        // host footprint column came back empty while the other two reported one - an
         // asymmetry that reads as a finding. The default names each engine's own process;
-        // it is settable because a name that is generic enough to be someone else's — the
-        // LOKEN daemon used to be called plain "server" — silently sums a stranger's memory
+        // it is settable because a name that is generic enough to be someone else's - the
+        // LOKEN daemon used to be called plain "server" - silently sums a stranger's memory
         // into the engine's footprint.
         let host_names: Vec<&str> = host_proc_names.iter().map(String::as_str).collect();
         let host_sampler = HostSampler::start(gpu_interval_ms.max(200), &host_names);
@@ -1206,8 +1206,8 @@ async fn run_cell<'a>(
                 .await
         };
 
-        // Prefill→decode boundary (first-token wall time) so the energy sampler
-        // isolates decode-phase energy — the cache-confound-free per-token metric.
+        // Prefill->decode boundary (first-token wall time) so the energy sampler
+        // isolates decode-phase energy - the cache-confound-free per-token metric.
         let decode_start_s = result
             .as_ref()
             .ok()
@@ -1278,7 +1278,7 @@ async fn run_cell<'a>(
                             } else {
                                 0.0
                             };
-                            // Decode-phase (prefill-excluded) J/tok — the honest
+                            // Decode-phase (prefill-excluded) J/tok - the honest
                             // cross-engine metric (immune to the prompt-cache confound).
                             let dec = ew.j_per_decode_tok(toks);
                             let dec_str = match dec {
@@ -1286,7 +1286,7 @@ async fn run_cell<'a>(
                                 None => String::new(),
                             };
                             println!(
-                                "        energy: {:.2} J ({}) → {:.4} J/tok [gpu {:.4} + cpu {:.4}]{}, {:.3e} gCO2/tok",
+                                "        energy: {:.2} J ({}) -> {:.4} J/tok [gpu {:.4} + cpu {:.4}]{}, {:.3e} gCO2/tok",
                                 ew.energy_j, dom, j, gpt, cpt, dec_str,
                                 ew.gco2_per_tok(toks, carbon_intensity).unwrap_or(0.0)
                             );
@@ -1304,7 +1304,7 @@ async fn run_cell<'a>(
             }
             Err(e) => {
                 // Record nothing for a failed iteration. The four vectors are read positionally
-                // — j_per_tok zips energy against tokens_generated — so a slot pushed here
+                // - j_per_tok zips energy against tokens_generated - so a slot pushed here
                 // without a matching `all_metrics` entry does not "keep alignment", it shifts
                 // every later window onto the wrong request's token count. A failure has no
                 // token count to pair with, and its window covers a request that did not run
@@ -1356,10 +1356,10 @@ async fn run_cell<'a>(
         None
     };
     if let Some(sample) = &degenerate {
-        println!("    [coherence] FAIL — the answer repeats itself: {sample:?}");
+        println!("    [coherence] FAIL - the answer repeats itself: {sample:?}");
         println!("    [coherence] a rate measured on this is not a rate. Treat the cell as empty.");
     } else if missing_substr {
-        println!("    [coherence] FAIL — an iteration contained none of the required substrings");
+        println!("    [coherence] FAIL - an iteration contained none of the required substrings");
     } else if coherence_pass == Some(true) {
         println!(
             "    [coherence] PASS ({} iter{})",
@@ -1448,7 +1448,7 @@ async fn run_cell<'a>(
     if let Some(s) = Stats::compute(&lbl("Energy J/tok"), "J", &j_per_tok) {
         stats.push(s);
     }
-    // Decode-phase J/tok (prefill excluded) — the cross-engine energy metric.
+    // Decode-phase J/tok (prefill excluded) - the cross-engine energy metric.
     let j_per_decode_tok = per_token(&all_metrics, &all_energy, |w, t| w.j_per_decode_tok(t));
     if let Some(s) = Stats::compute(&lbl("Energy decode J/tok"), "J", &j_per_decode_tok) {
         stats.push(s);
@@ -1577,12 +1577,12 @@ fn print_sweep_comparison(cells: &[CellResult], target_a: &ServerTarget, target_
     }
 
     println!();
-    println!("  ╔══════════════════════════════════════════════════════════════════════╗");
+    println!("  +======================================================================+");
     println!(
-        "  ║ SWEEP COMPARISON ({} vs {})",
+        "  | SWEEP COMPARISON ({} vs {})",
         targets[0].label, targets[1].label
     );
-    println!("  ╚══════════════════════════════════════════════════════════════════════╝");
+    println!("  +======================================================================+");
 
     for ((model, num_ctx, prompt), group) in &groups {
         let cell_a = group.iter().find(|c| c.target.label == targets[0].label);
@@ -1649,7 +1649,7 @@ fn save_json(path: &str, args: &Args, cells: &[CellResult], idle_energy: Option<
                             "cpu_rapl_available": w.cpu_rapl_available,
                             "dram_rapl_available": w.dram_rapl_available,
                             "note": w.note,
-                            // Decode-phase (prefill-excluded) — the cache-confound-free metric.
+                            // Decode-phase (prefill-excluded) - the cache-confound-free metric.
                             "gpu_decode_j": w.gpu_decode_j,
                             "cpu_pkg_decode_j": w.cpu_pkg_decode_j,
                             "dram_decode_j": w.dram_decode_j,
@@ -1842,7 +1842,7 @@ mod pairing_tests {
 
     /// Each window divides the tokens of ITS OWN iteration. A failed request used to push a
     /// window without pushing metrics, after which every later window divided a different
-    /// request's token count — arithmetic that reads perfectly and is wrong.
+    /// request's token count - arithmetic that reads perfectly and is wrong.
     #[test]
     fn a_window_is_divided_by_its_own_iterations_tokens() {
         let m = vec![ran(10), ran(100)];

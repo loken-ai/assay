@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# vllm-serve-ollama.sh — serve an Ollama GGUF blob with vLLM (OpenAI /v1 API)
+# vllm-serve-ollama.sh - serve an Ollama GGUF blob with vLLM (OpenAI /v1 API)
 # so the bench can hit the EXACT same weights Ollama runs (bit-for-bit fair).
 #
 # It resolves an Ollama tag -> its single-file GGUF blob via the local manifest
@@ -14,11 +14,11 @@
 #   scripts/vllm-serve-ollama.sh qwen3:8b -- --enforce-eager          # pass extra args to vllm after --
 #
 # Caveats (see project_vllm_install_bench memory):
-#   * vLLM's GGUF path is experimental/under-optimized — this measures "who runs
+#   * vLLM's GGUF path is experimental/under-optimized - this measures "who runs
 #     this GGUF faster", not vLLM's production (FP8/AWQ) ceiling.
 #   * Only dense archs load via GGUF (qwen3, llama, gemma, mistral, qwen2).
 #     gpt-oss(MXFP4)/nemotron(mamba)/lfm2/qwen3.5(deltanet) will NOT load.
-#   * GGUF tokenizer conversion is slow/unstable for large vocab — pass
+#   * GGUF tokenizer conversion is slow/unstable for large vocab - pass
 #     --tokenizer <hf-repo> if startup hangs or errors on the tokenizer.
 set -euo pipefail
 
@@ -30,7 +30,7 @@ GMU=0.85
 MAXLEN=8192
 TOKENIZER=""
 # GGUF quant only supports float16/float32 (NOT bfloat16), and vLLM warns
-# bf16 GGUF has precision issues on Blackwell — so default to float16.
+# bf16 GGUF has precision issues on Blackwell - so default to float16.
 DTYPE=float16
 TAG=""
 EXTRA=()

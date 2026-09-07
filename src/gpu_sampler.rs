@@ -1,4 +1,4 @@
-//! Background NVML sampler — periodically reads VRAM/utilization/power for every CUDA GPU.
+//! Background NVML sampler - periodically reads VRAM/utilization/power for every CUDA GPU.
 //!
 //! Usage:
 //!   let sampler = GpuSampler::start(100); // sample every 100ms
@@ -19,7 +19,7 @@ use tokio::task::JoinHandle;
 pub struct GpuSample {
     pub gpu_index: u32,
     pub gpu_name: String,
-    /// Peak VRAM in use on the DEVICE, in MB — not by the engine. NVML reports what every
+    /// Peak VRAM in use on the DEVICE, in MB - not by the engine. NVML reports what every
     /// process plus the driver holds, so anything else resident on the card is inside this
     /// number. The benchmark protocol stops the other engines for that reason; on a shared
     /// machine, read it as an upper bound.

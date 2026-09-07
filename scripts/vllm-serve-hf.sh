@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# vllm-serve-hf.sh — serve a HuggingFace model with vLLM (OpenAI /v1 API) on
-# vLLM's native/optimized path (FP16, or AWQ/GPTQ/FP8 quants — auto-detected
+# vllm-serve-hf.sh - serve a HuggingFace model with vLLM (OpenAI /v1 API) on
+# vLLM's native/optimized path (FP16, or AWQ/GPTQ/FP8 quants - auto-detected
 # from the repo's config). This is the way to benchmark vLLM "at its best",
 # vs the Ollama-GGUF reuse path (which vLLM's loader rejects for K-quants).
 #

@@ -72,10 +72,10 @@ impl Stats {
         } else if self.unit == "tok/s" {
             format!("{:.1}", val)
         } else if self.unit == "J" {
-            // Energy per token is sub-joule to a few J — keep 3 decimals.
+            // Energy per token is sub-joule to a few J - keep 3 decimals.
             format!("{:.3}", val)
         } else if self.unit == "Wh" || self.unit == "g" {
-            // Wh/tok and gCO2/tok are tiny (1e-4..1e-6) — scientific notation.
+            // Wh/tok and gCO2/tok are tiny (1e-4..1e-6) - scientific notation.
             format!("{:.3e}", val)
         } else {
             format!("{:.0}", val)
@@ -175,8 +175,8 @@ pub fn print_comparison(label_a: &str, stats_a: &[Stats], label_b: &str, stats_b
                 "  {:<22} {:>16} {:>16} {:>10}",
                 sa.label,
                 sa.fmt_val(sa.p50),
-                "—",
-                "—"
+                "-",
+                "-"
             );
             continue;
         };
@@ -270,9 +270,9 @@ mod tests {
     fn compute_uses_sample_stddev_not_population() {
         // values: 2, 4, 4, 4, 5, 5, 7, 9
         // mean = 5; sum_sq_dev = 9+1+1+1+0+0+4+16 = 32
-        // sample variance = 32 / (n-1) = 32/7 ≈ 4.5714
-        // sample stddev   = sqrt(32/7)    ≈ 2.1381
-        // (population stddev would be sqrt(32/8) = 2.0 — n-1 denominator
+        // sample variance = 32 / (n-1) = 32/7 ~ 4.5714
+        // sample stddev   = sqrt(32/7)    ~ 2.1381
+        // (population stddev would be sqrt(32/8) = 2.0 - n-1 denominator
         // is the correct estimator for an unknown distribution like ours.)
         let s = Stats::compute("x", "ms", &[2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]).unwrap();
         approx(s.mean, 5.0);
@@ -292,9 +292,9 @@ mod tests {
         // sorted [1, 2, 3, 4, 5]: p50 = index 2 = 3
         let sorted = [1.0, 2.0, 3.0, 4.0, 5.0];
         approx(percentile(&sorted, 50.0), 3.0);
-        // p25 of 5 values: rank = 0.25 * 4 = 1.0 → exact index 1 = 2
+        // p25 of 5 values: rank = 0.25 * 4 = 1.0 -> exact index 1 = 2
         approx(percentile(&sorted, 25.0), 2.0);
-        // p95 of 5 values: rank = 0.95 * 4 = 3.8 → interp(3, 4) at frac 0.8
+        // p95 of 5 values: rank = 0.95 * 4 = 3.8 -> interp(3, 4) at frac 0.8
         // = 4 * 0.2 + 5 * 0.8 = 0.8 + 4 = 4.8
         approx(percentile(&sorted, 95.0), 4.8);
     }

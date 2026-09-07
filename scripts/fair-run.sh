@@ -1,18 +1,18 @@
 #!/bin/bash
-# fair-run.sh — run the same benchmark against several engines, comparably.
+# fair-run.sh - run the same benchmark against several engines, comparably.
 #
 # The tool measures; this script is what makes the measurement mean something. Its rules were
-# not chosen for elegance — each one exists because a run without it produced a number that
+# not chosen for elegance - each one exists because a run without it produced a number that
 # was wrong in a way nobody noticed.
 #
 # ONE ENGINE AT A TIME, PROCESSES STOPPED. Not just models unloaded: a peer engine's process
 # still holds memory and perturbs the next one's placement. Measured once, a model that should
-# have gone to the fast card went to the slow one because another engine's process was up —
+# have gone to the fast card went to the slow one because another engine's process was up -
 # and the resulting "win" was a hardware difference wearing a software label.
 #
 # THE SAME CARDS FOR EVERYONE. `CUDA_DEVICE_ORDER=PCI_BUS_ID` is forced for all three so an
 # index means the same physical card in each, and which cards each engine may use comes from
-# scripts/gpu-policy.sh — one declaration, applied to every launch. Restricting one engine to
+# scripts/gpu-policy.sh - one declaration, applied to every launch. Restricting one engine to
 # a card while the others keep the machine is the easiest way to publish a fiction.
 #
 # DERIVED, NOT LISTED. Whether ollama is pinned to one card is decided by the weights against
@@ -25,7 +25,7 @@
 # three can be held to.
 #
 # vLLM fixes its model at launch, so it gets one isolated run per model, and it cannot read
-# mixed-quant GGUF — point it at the equivalent HF checkpoint with
+# mixed-quant GGUF - point it at the equivalent HF checkpoint with
 # VLLM_SERVE="hf:<repo> --name <tag-the-others-use>".
 #
 # Usage:
@@ -37,7 +37,7 @@
 # Do not pass -o; use OUT=. CPU mode forces --num-gpu 0 on ollama, which is only fair because
 # the other engines are launched CPU-only alongside it.
 #
-# ── EVERY KNOB, IN ONE PLACE ─────────────────────────────────────────────────────────────
+# -- EVERY KNOB, IN ONE PLACE -------------------------------------------------------------
 #   the run      BENCH_MODE=cpu|gpu   OUT=<file>   MODELS_DIR=<ollama blob store>
 #                STREAM=0             to also cover the non-streamed path
 #                VLLM_SERVE="hf:<repo> --name <tag>"   to include vLLM in a GPU run
@@ -45,15 +45,15 @@
 #                GPU_PIN=<n>          older spelling of GPUS=<n>
 #   binaries     ASSAY   OLLAMA_BIN   LOKEN_BIN   VLLM_HF_LAUNCHER   VLLM_TAG_LAUNCHER
 #   ports        OLLAMA_PORT   LOKEN_PORT   VLLM_PORT
-#   machine      PKG_TEMP_SENSOR=<sysfs temp file>   COOL_C=<°C>   LOGDIR=<dir>
+#   machine      PKG_TEMP_SENSOR=<sysfs temp file>   COOL_C=<C>   LOGDIR=<dir>
 #
 # Nothing below needs editing to run this elsewhere; everything above takes an override.
 set -euo pipefail
 HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 
-# ── THE ENGINES ──────────────────────────────────────────────────────────────────────────
+# -- THE ENGINES --------------------------------------------------------------------------
 # One paragraph each, the same three lines every time: where its binary is, where it listens,
-# and — for the one that needs it — how it is launched. Every value takes an override from
+# and - for the one that needs it - how it is launched. Every value takes an override from
 # the environment, including the ports, so two runs can coexist and nobody has to edit this
 # file to run it on their own machine.
 OLLAMA_BIN="${OLLAMA_BIN:-$(command -v ollama || echo ollama)}"
@@ -69,7 +69,7 @@ VLLM_HF_LAUNCHER="${VLLM_HF_LAUNCHER:-$HERE/vllm-serve-hf.sh}"
 VLLM_TAG_LAUNCHER="${VLLM_TAG_LAUNCHER:-$HERE/vllm-serve-ollama.sh}"
 VLLM_PORT="${VLLM_PORT:-8000}"
 
-# ── THE RUN ──────────────────────────────────────────────────────────────────────────────
+# -- THE RUN ------------------------------------------------------------------------------
 ASSAY="${ASSAY:-$(command -v assay || echo target/release/assay)}"   # the tool being driven
 MODELS_DIR="${MODELS_DIR:-$HOME/.ollama/models}"                     # ollama's blob store
 BENCH_MODE="${BENCH_MODE:-cpu}"                                      # cpu | gpu
@@ -77,11 +77,11 @@ OUT="${OUT:-results/fairbench.json}"
 GPU_PIN="${GPU_PIN:-}"          # older spelling of GPUS=<n>: expose only that card
 [ "$BENCH_MODE" = cpu ] || [ "$BENCH_MODE" = gpu ] || { echo "BENCH_MODE must be cpu|gpu" >&2; exit 1; }
 
-# WHICH CARDS EACH ENGINE MAY USE — read from gpu-policy.sh, which is the only place that
+# WHICH CARDS EACH ENGINE MAY USE - read from gpu-policy.sh, which is the only place that
 # decision is written. It resolves a card list to device UUIDs, because CUDA_VISIBLE_DEVICES=0
 # means a different physical card depending on the ordering, and translates one policy into
 # each engine's own lever: OLLAMA_SCHED_SPREAD when ollama can see more than one card (seeing
-# them is not using them — its scheduler otherwise settles on one), and --tensor-parallel-size
+# them is not using them - its scheduler otherwise settles on one), and --tensor-parallel-size
 # for vLLM.
 #
 # GPU_PIN is kept as the older spelling of "expose only this card"; fold it in before the
@@ -112,10 +112,10 @@ blob_bytes_of() {
   stat -c%s "$MODELS_DIR/blobs/$blob" 2>/dev/null || echo 0
 }
 
-# HOW MANY CARDS — derived from the weights, never from a list of model names.
+# HOW MANY CARDS - derived from the weights, never from a list of model names.
 #
 # Restricting ollama to one card is the right handicap while the weights fit that card: every
-# engine is then measured on the same silicon. Above it the same restriction inverts — ollama
+# engine is then measured on the same silicon. Above it the same restriction inverts - ollama
 # gets one card plus host spill while the others get the machine, and the resulting "win" is a
 # missing card rather than a placement. Measured once on a model larger than one card: ollama
 # offloaded most layers to a single card and mapped the rest to the host, while the second card
@@ -134,13 +134,13 @@ if [ "$BENCH_MODE" = gpu ] && [ -z "$GPU_PIN" ] && [ "$_one_card" -gt 0 ] && [ "
   OLLAMA_GPUS=all             # one card cannot hold it: give every engine the machine
   LOKEN_GPUS=all
   VLLM_GPUS=all
-  echo "  ⓘ $_probe_model weighs $((_blob/1000000000)) GB > one card ($((_one_card/1000000000)) GB) — every engine unpinned" >&2
+  echo "  ⓘ $_probe_model weighs $((_blob/1000000000)) GB > one card ($((_one_card/1000000000)) GB) - every engine unpinned" >&2
 fi
 gpu_policy_banner
 # --stream is the protocol default: it measures a decode rate client-side and identically
 # for all three engines. STREAM=0 lifts it so the non-streaming path can be covered too -
 # most integrations call it, and it had never been measured.
-# ── THE PROTOCOL — what this script forces on every engine, and will not let a caller relax.
+# -- THE PROTOCOL - what this script forces on every engine, and will not let a caller relax.
 # Cold (no warm-up), greedy through the tool's own default, one carbon intensity so the gCO2
 # column means the same thing across runs, and streaming unless STREAM=0 asks for the other
 # path. These are the reason a number from here can be compared with a number from there.
@@ -148,17 +148,17 @@ COMMON=(--warmup 0 --carbon-intensity 50)
 [ "${STREAM:-1}" = 1 ] && COMMON+=(--stream)
 
 # Thermal fairness: the two engines run back-to-back, so without a gate the SECOND engine
-# starts on a hotter part and clocks lower — a measurable ordering bias (the engine measured
+# starts on a hotter part and clocks lower - a measurable ordering bias (the engine measured
 # first runs on a colder machine, which recommends gating on a real thermometer, not blind
 # sleeps). Both modes gate, on the part that does the work: the CPU package, or the hottest
 # card. Cap the wait so a hot box still finishes.
 #
-# The GPU threshold is not a number chosen here. A card that idles at 46°C would never pass a
-# fixed 45, and one that idles at 28 would pass while still 15° above its own floor. So the
+# The GPU threshold is not a number chosen here. A card that idles at 46C would never pass a
+# fixed 45, and one that idles at 28 would pass while still 15 C above its own floor. So the
 # floor is measured once, before anything runs, and each gate waits for the cards to come back
 # within GPU_COOL_MARGIN_C of it.
 # The package sensor is found by TYPE, because the zone NUMBER differs per machine and a
-# hardcoded one silently reads someone else's thermometer — or nothing at all.
+# hardcoded one silently reads someone else's thermometer - or nothing at all.
 _discover_pkg_temp() {
   local z
   for z in /sys/class/thermal/thermal_zone*; do
@@ -168,9 +168,9 @@ _discover_pkg_temp() {
   done
   return 1
 }
-PKG_TEMP_SENSOR="${PKG_TEMP_SENSOR:-$(_discover_pkg_temp || true)}"   # milli-°C, may be empty
+PKG_TEMP_SENSOR="${PKG_TEMP_SENSOR:-$(_discover_pkg_temp || true)}"   # milli-C, may be empty
 
-# Hottest card, in whole °C. Empty when there is no nvidia-smi to ask.
+# Hottest card, in whole C. Empty when there is no nvidia-smi to ask.
 _gpu_hottest_c() {
   nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits 2>/dev/null \
     | sort -rn | head -1
@@ -179,47 +179,47 @@ _gpu_hottest_c() {
 # floor it can meet, which is the honest failure: the gate then admits it is gating on a warm
 # machine rather than pretending the reading means what it does on a cold one.
 GPU_IDLE_C="${GPU_IDLE_C:-$(_gpu_hottest_c)}"
-[ -n "${GPU_IDLE_C:-}" ] && echo "  🌡 gpu idle floor ${GPU_IDLE_C}°C" >&2
+[ -n "${GPU_IDLE_C:-}" ] && echo "  🌡 gpu idle floor ${GPU_IDLE_C}C" >&2
 
 cool_wait() {
   local t
   if [ "$BENCH_MODE" = cpu ]; then
     [ -r "$PKG_TEMP_SENSOR" ] || return 0
     local thr_mc=$(( ${COOL_C:-45} * 1000 ))
-    for _ in $(seq 1 120); do            # ≤120 s cap
+    for _ in $(seq 1 120); do            # <=120 s cap
       t=$(cat "$PKG_TEMP_SENSOR" 2>/dev/null || echo 0)
-      [ "$t" -le "$thr_mc" ] && { echo "  🌡 pkg $((t/1000))°C ≤ ${COOL_C:-45}°C — proceeding" >&2; return 0; }
+      [ "$t" -le "$thr_mc" ] && { echo "  🌡 pkg $((t/1000))C <= ${COOL_C:-45}C - proceeding" >&2; return 0; }
       sleep 2
     done
-    echo "  🌡 pkg still $((t/1000))°C after cap — proceeding anyway" >&2
+    echo "  🌡 pkg still $((t/1000))C after cap - proceeding anyway" >&2
     return 0
   fi
 
   [ -n "${GPU_IDLE_C:-}" ] || return 0
-  # 8°C rather than a tighter band: the trade is between an ordering bias and a campaign that
+  # 8C rather than a tighter band: the trade is between an ordering bias and a campaign that
   # does not finish. Below about 4 the wait dominates the measurement on a full matrix; above
   # about 12 the second engine measurably starts warmer than the first.
   local thr=$(( GPU_IDLE_C + ${GPU_COOL_MARGIN_C:-8} ))
   # Longer cap than the CPU gate: a card sheds heat through a much smaller radiator than a
-  # tower cooler, and a 70°C card takes minutes rather than seconds to come back.
-  for _ in $(seq 1 300); do            # ≤600 s cap
+  # tower cooler, and a 70C card takes minutes rather than seconds to come back.
+  for _ in $(seq 1 300); do            # <=600 s cap
     t=$(_gpu_hottest_c)
     [ -z "$t" ] && return 0
-    [ "$t" -le "$thr" ] && { echo "  🌡 gpu ${t}°C ≤ ${thr}°C — proceeding" >&2; return 0; }
+    [ "$t" -le "$thr" ] && { echo "  🌡 gpu ${t}C <= ${thr}C - proceeding" >&2; return 0; }
     sleep 2
   done
-  echo "  🌡 gpu still ${t}°C after cap (floor ${GPU_IDLE_C}°C) — proceeding anyway" >&2
+  echo "  🌡 gpu still ${t}C after cap (floor ${GPU_IDLE_C}C) - proceeding anyway" >&2
 }
 
 kill_all() {
   # Kill engines AND their GPU-holding children: ollama spawns `llama-server`;
   # vLLM spawns `VLLM::EngineCore` + multiprocessing `resource_tracker` python
-  # workers (note the UPPERCASE name → match case-insensitively). Missing these
+  # workers (note the UPPERCASE name -> match case-insensitively). Missing these
   # leaks ~13GB/GPU of orphaned VRAM that silently wrecks the next engine's run.
   pkill -9 -x ollama 2>/dev/null || true
   # -x (exact comm), NOT -f: free-text -f patterns match any OTHER shell whose
   # command line merely MENTIONS these words (e.g. a wrapper doing its own
-  # cleanup) and silently kill it mid-run — bit us repeatedly on 2026-07-02.
+  # cleanup) and silently kill it mid-run - bit us repeatedly on 2026-07-02.
   pkill -9 -x llama-server 2>/dev/null || true
   # The engine under test, by the name its binary actually carries. `server` is what that
   # binary was called before it was renamed, so this line killed nothing for months: the
@@ -233,7 +233,7 @@ kill_all() {
   # Wait for VRAM to drain to NEAR-ZERO (killed CUDA procs release asynchronously).
   # Drain to driver overhead only, not to "nearly free". A memory estimator that finds the
   # card not quite pristine can decide a near-limit model does not fit and place it on the
-  # CPU — which then gets recorded as that engine's GPU number, several times too slow. The
+  # CPU - which then gets recorded as that engine's GPU number, several times too slow. The
   # same engine started on a clean card places the same model on the GPU. So drain hard and
   # let it settle before starting the next engine.
   for _ in $(seq 1 40); do
@@ -244,7 +244,7 @@ kill_all() {
   done
   sleep 3   # extra settle: VRAM "used" can read low before the allocator fully releases
 }
-# wait_url <url> [seconds] [must-contain] — an engine answering is not an engine ready:
+# wait_url <url> [seconds] [must-contain] - an engine answering is not an engine ready:
 # vLLM serves /v1/models while the weights are still loading, so the third argument lets a
 # probe demand a substring rather than a status code.
 wait_url() {
@@ -260,7 +260,7 @@ wait_url() {
   return 1
 }
 
-# ── THE ENGINES ──────────────────────────────────────────────────────────────────────────
+# -- THE ENGINES --------------------------------------------------------------------------
 # One declaration each. Everything below starts, probes and stops them identically; what
 # differs between them is DATA in this table, not three shapes of code further down.
 #
@@ -273,18 +273,18 @@ declare -A E_BIN E_ARGS E_ENV E_CWD E_PROBE E_WANT E_WAIT
 engine_start() {
   local n="$1"
   # Two statements, not one: bash expands every word of a `local` before assigning any of
-  # them, so "$n" in a second assignment on the same line reads the OUTER n — unset here.
+  # them, so "$n" in a second assignment on the same line reads the OUTER n - unset here.
   local log="$LOGDIR/$n.log"
   kill_all
   mkdir -p "$LOGDIR"
   ( cd "${E_CWD[$n]:-$PWD}" \
     && env $(gpu_env_for "$n") ${E_ENV[$n]:-} nohup "${E_BIN[$n]}" ${E_ARGS[$n]:-} >"$log" 2>&1 & )
   wait_url "${E_PROBE[$n]}" "${E_WAIT[$n]:-60}" "${E_WANT[$n]:-}" \
-    || { echo "  ⚠ $n did not come up within ${E_WAIT[$n]:-60}s — see $log" >&2; return 1; }
+    || { echo "  ⚠ $n did not come up within ${E_WAIT[$n]:-60}s - see $log" >&2; return 1; }
   return 0
 }
 
-# ── DERIVED — computed from the above, not settable. Grouped so the top of the file stays
+# -- DERIVED - computed from the above, not settable. Grouped so the top of the file stays
 # the list of what a caller decides, and this stays the list of what follows from it.
 TMP=$(mktemp -d); PARTS=()
 TMPDIR_LOGS="$TMP/logs"; LOGDIR="${LOGDIR:-$TMPDIR_LOGS}"; mkdir -p "$LOGDIR"
@@ -297,18 +297,12 @@ E_PROBE[ollama]="http://127.0.0.1:$OLLAMA_PORT/api/version"; E_WAIT[ollama]=60
 
 E_BIN[loken]="$LOKEN_ABS"; E_ARGS[loken]="serve --models-dir $MODELS_DIR --keep-alive 30m ${LOKEN_EXTRA[*]:-}"
 # Started from the directory that HOLDS config.toml. There is no --config flag: the server
-# looks for ./config.toml first, so the working directory silently decides which configuration
-# is measured — and a different memory fraction is a different per-card budget, hence a
-# different placement for any model near the boundary.
-#
-# Derived from the BINARY, not from this script. The harness lives in its own checkout, so
-# taking its own parent measured an engine that read no configuration at all: a 70B fell from
-# 18.7 to 4.3 tok/s with ten layers on the host and six gigabytes free on the cards, and
-# nothing in the output said so. The refusal below is the part that makes it impossible to
-# publish that number twice.
-# The engine reads ./config.toml from where it starts. LOKEN_CWD points it at another one -
-# a variant arm of a campaign, the same binary with a drafter named - without touching the
-# configuration in the tree that every other cell is measured with.
+# looks for ./config.toml first, so the working directory decides which configuration is
+# measured, and a different memory fraction is a different per-card budget, hence a different
+# placement for any model near the boundary. The directory is derived from the binary, not from
+# this script, and the run refuses to start without a config.toml there. LOKEN_CWD points the
+# engine at another one - a variant arm of a campaign, the same binary with a drafter named -
+# without touching the configuration in the tree that every other cell is measured with.
 E_CWD[loken]="${LOKEN_CWD:-$(cd "$(dirname "$LOKEN_ABS")/../.." && pwd)}"
 [ -f "${E_CWD[loken]}/config.toml" ] || {
   echo "no config.toml in ${E_CWD[loken]} - refusing to measure an engine that would read its defaults" >&2
@@ -320,20 +314,20 @@ E_PROBE[loken]="http://127.0.0.1:$LOKEN_PORT/api/version"; E_WAIT[loken]=60
 # converted ollama tag). The wrapper is data here like the others, not a special case below.
 E_BIN[vllm]="$VLLM_HF_LAUNCHER"
 E_PROBE[vllm]="http://127.0.0.1:$VLLM_PORT/v1/models"; E_WANT[vllm]='"id"'; E_WAIT[vllm]=600
-echo "▶ BENCH_MODE=$BENCH_MODE  GPU_PIN='${GPU_PIN:-none}'  → $OUT"
+echo "▶ BENCH_MODE=$BENCH_MODE  GPU_PIN='${GPU_PIN:-none}'  -> $OUT"
 
-# ── 1. ollama, isolated ──────────────────────────────────────────────────────
+# -- 1. ollama, isolated ------------------------------------------------------
 # RETRY on CPU-fallback: a VRAM-tight model can spill to the CPU at load non-deterministically
-# — a transient memory reading at placement time, not a real fit limit. The same model on the
+# - a transient memory reading at placement time, not a real fit limit. The same model on the
 # same card usually places entirely on the GPU and occasionally does not. Recording the
 # fallback as that engine's GPU result inflates the comparison severalfold. So: detect a large
 # "CPU model buffer" (>2000 MiB = real fallback, vs the ~270 MiB embed buffer that's
-# normal even on full-GPU) in the ollama log and RETRY (up to 3×) on a fresh restart.
+# normal even on full-GPU) in the ollama log and RETRY (up to 3x) on a fresh restart.
 # Only applies in GPU mode (CPU mode legitimately runs everything on CPU).
 # _probe_model was parsed with the placement decision above.
 cpubuf_of_log() { grep -oE "CPU(_Mapped)? model buffer size = +[0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+$" | sort -rn | head -1; }
 # GUARD: GPU_PIN restricts CUDA_VISIBLE_DEVICES to ONE card. A model whose weights exceed
-# that card's usable VRAM then spills to the host and decodes at CPU speed — which reads as a
+# that card's usable VRAM then spills to the host and decodes at CPU speed - which reads as a
 # catastrophic loss and is really a pin the model never fitted behind. The tell in the results
 # is a GPU decode rate that matches the CPU one. Warn only: GPU_PIN is
 # an explicit operator choice, and unpinning it silently would measure a machine nobody
@@ -344,7 +338,7 @@ if [ "$BENCH_MODE" = gpu ] && [ -n "$GPU_PIN" ]; then
   for _m in "${_MS[@]}"; do
     _sz=$(blob_bytes_of "$_m")
     if [ "$_one_card" -gt 0 ] && [ "$_sz" -gt "$_one_card" ]; then
-      echo "⚠️⚠️  GPU_PIN=$GPU_PIN + '$_m' weighs $((_sz/1000000000)) GB > one card ($((_one_card/1000000000)) GB) → it will SPILL to CPU (fake loss, GPU tok/s ≈ CPU tok/s)." >&2
+      echo "⚠️⚠️  GPU_PIN=$GPU_PIN + '$_m' weighs $((_sz/1000000000)) GB > one card ($((_one_card/1000000000)) GB) -> it will SPILL to CPU (fake loss, GPU tok/s ~ CPU tok/s)." >&2
       echo "⚠️⚠️  Re-run without GPU_PIN so every engine gets the same cards." >&2
     fi
   done
@@ -354,7 +348,7 @@ fi
 if [ -z "${LOKEN_ONLY:-}" ]; then
 for _att in 1 2 3; do
   kill_all
-  echo "▶ ollama (default params)${_att:+ [try $_att]} …"
+  echo "▶ ollama (default params)${_att:+ [try $_att]} ..."
   engine_start ollama || true
   # PRE-BENCH placement probe (GPU mode, NON-spread only): force a one-token load and check
   # whether ollama CPU-fell BEFORE wasting a full multi-context bench; retry on a fresh
@@ -372,10 +366,10 @@ for _att in 1 2 3; do
     # served it perfectly well by hand.
     cpubuf=$(cpubuf_of_log "$LOGDIR/ollama.log" || true); [ -z "$cpubuf" ] && cpubuf=0
     if [ "$cpubuf" -gt 2000 ] && [ "$_att" -lt 3 ]; then
-      echo "  ⚠ ollama CPU-fell at load (CPU model buffer ${cpubuf} MiB) — retrying on fresh restart" >&2
+      echo "  ⚠ ollama CPU-fell at load (CPU model buffer ${cpubuf} MiB) - retrying on fresh restart" >&2
       continue
     fi
-    [ "$cpubuf" -gt 2000 ] && echo "  ⚠ ollama STILL CPU-fell after 3 tries (CPU buffer ${cpubuf} MiB) — model is VRAM-marginal on this box; recording ollama's CPU-fallback as its real default behaviour" >&2
+    [ "$cpubuf" -gt 2000 ] && echo "  ⚠ ollama STILL CPU-fell after 3 tries (CPU buffer ${cpubuf} MiB) - model is VRAM-marginal on this box; recording ollama's CPU-fallback as its real default behaviour" >&2
   fi
   cool_wait
   "$ASSAY" --ollama http://127.0.0.1:$OLLAMA_PORT "${NUMGPU[@]}" "${COMMON[@]}" "$@" -o "$TMP/ollama.json" || true
@@ -384,18 +378,18 @@ done
 fi
 if [ -f "$TMP/ollama.json" ]; then PARTS+=("$TMP/ollama.json"); fi
 
-# ── 2. LOKEN, isolated ───────────────────────────────────────────────────────
+# -- 2. LOKEN, isolated -------------------------------------------------------
 kill_all
-echo "▶ LOKEN${LOKEN_EXTRA:+ ${LOKEN_EXTRA[*]}} …"
+echo "▶ LOKEN${LOKEN_EXTRA:+ ${LOKEN_EXTRA[*]}} ..."
 engine_start loken || true
 cool_wait
 "$ASSAY" --loken http://127.0.0.1:$LOKEN_PORT "${NUMGPU[@]}" "${COMMON[@]}" "$@" -o "$TMP/loken.json" || true
 if [ -f "$TMP/loken.json" ]; then PARTS+=("$TMP/loken.json"); fi
 
-# ── 3. vLLM, isolated (GPU only, when requested) ─────────────────────────────
+# -- 3. vLLM, isolated (GPU only, when requested) -----------------------------
 if [ "$BENCH_MODE" = gpu ] && [ -n "${VLLM_SERVE:-}" ] && [ -z "${LOKEN_ONLY:-}" ]; then
   kill_all
-  echo "▶ vLLM: $VLLM_SERVE …"
+  echo "▶ vLLM: $VLLM_SERVE ..."
   # Which wrapper depends on where the weights come from; its own index flag stays because
   # vLLM parses CUDA_VISIBLE_DEVICES as integers and a UUID breaks it. The card SET is the
   # policy's; this only says which of those it starts on.
@@ -406,14 +400,14 @@ if [ "$BENCH_MODE" = gpu ] && [ -n "${VLLM_SERVE:-}" ] && [ -z "${LOKEN_ONLY:-}"
     E_BIN[vllm]="$VLLM_TAG_LAUNCHER"
     E_ARGS[vllm]="$VLLM_SERVE --gpu ${GPU_PIN:-0} --port $VLLM_PORT"
   fi
-  echo "  waiting for vLLM to finish loading weights (minutes)…"
+  echo "  waiting for vLLM to finish loading weights (minutes)..."
   engine_start vllm || true
   "$ASSAY" --vllm "$VLLM_PORT" "${COMMON[@]}" "$@" -o "$TMP/vllm.json" || true
   if [ -f "$TMP/vllm.json" ]; then PARTS+=("$TMP/vllm.json"); fi
 fi
 
 kill_all
-# ── merge the per-engine results into one file ───────────────────────────────
+# -- merge the per-engine results into one file -------------------------------
 mkdir -p "$(dirname "$OUT")"
 jq -s '{timestamp: .[0].timestamp, config: .[0].config, results: (map(.results) | add)}' "${PARTS[@]}" > "$OUT"
-echo "▶ merged ${#PARTS[@]} engine(s) → $OUT"
+echo "▶ merged ${#PARTS[@]} engine(s) -> $OUT"

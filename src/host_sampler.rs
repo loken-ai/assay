@@ -1,4 +1,4 @@
-//! Background host sampler — periodically reads RSS/swap/CPU of the engine
+//! Background host sampler - periodically reads RSS/swap/CPU of the engine
 //! processes (matched by /proc/<pid>/comm) so each bench reports the host
 //! footprint next to the GPU one. Mirrors `gpu_sampler`'s start/stop shape.
 

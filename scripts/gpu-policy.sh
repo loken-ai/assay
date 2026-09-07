@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# WHICH CARDS EACH ENGINE MAY USE — one declaration, sourced by every launcher.
+# WHICH CARDS EACH ENGINE MAY USE - one declaration, sourced by every launcher.
 #
 # The policy was written three times, in three scripts, and drifted: bench-cell.sh gave LOKEN
 # the whole machine and restricted ollama to card 0, which is the comparison that scored two
@@ -10,7 +10,7 @@
 #   gpu_extra_args_for <engine>   # prints the per-engine flags (vLLM --tensor-parallel-size)
 #
 # GPUS is the policy: a comma-separated list of PHYSICAL card indices, or "all" (default).
-# Per-engine overrides exist for the deliberate asymmetric run — a fairness knob you can turn
+# Per-engine overrides exist for the deliberate asymmetric run - a fairness knob you can turn
 # the wrong way on purpose is honest; one that is only reachable for a single engine is not.
 #
 # Cards are exposed by UUID, never by index: CUDA_VISIBLE_DEVICES=0 means a different physical
@@ -22,7 +22,7 @@ OLLAMA_GPUS="${OLLAMA_GPUS:-$GPUS}"
 LOKEN_GPUS="${LOKEN_GPUS:-$GPUS}"
 VLLM_GPUS="${VLLM_GPUS:-$GPUS}"
 
-# _gpu_uuids <spec> — resolve "all" or "0,2" to the matching UUIDs, in the order asked.
+# _gpu_uuids <spec> - resolve "all" or "0,2" to the matching UUIDs, in the order asked.
 _gpu_uuids() {
     local spec="$1" all uuid i
     all=$(nvidia-smi --query-gpu=uuid --format=csv,noheader 2>/dev/null) || return 1
@@ -37,13 +37,13 @@ _gpu_uuids() {
     printf '%s' "$out"
 }
 
-# _gpu_count <spec> — how many cards that spec exposes.
+# _gpu_count <spec> - how many cards that spec exposes.
 _gpu_count() {
     if [ "$1" = all ]; then nvidia-smi --query-gpu=uuid --format=csv,noheader 2>/dev/null | grep -c .
     else echo "$1" | tr ',' '\n' | grep -c .; fi
 }
 
-# gpu_env_for <ollama|loken|vllm> — the env prefix for that engine's launch.
+# gpu_env_for <ollama|loken|vllm> - the env prefix for that engine's launch.
 gpu_env_for() {
     local spec n uuids
     case "$1" in
@@ -60,7 +60,7 @@ gpu_env_for() {
     return 0
 }
 
-# gpu_extra_args_for <engine> — flags that are not environment.
+# gpu_extra_args_for <engine> - flags that are not environment.
 gpu_extra_args_for() {
     local spec n
     case "$1" in
@@ -73,10 +73,10 @@ gpu_extra_args_for() {
     return 0
 }
 
-# gpu_policy_banner — print what every engine was actually given, so a run is self-describing.
+# gpu_policy_banner - print what every engine was actually given, so a run is self-describing.
 gpu_policy_banner() {
-    printf '  GPUs — ollama:%s  loken:%s  vllm:%s\n' "$OLLAMA_GPUS" "$LOKEN_GPUS" "$VLLM_GPUS" >&2
+    printf '  GPUs - ollama:%s  loken:%s  vllm:%s\n' "$OLLAMA_GPUS" "$LOKEN_GPUS" "$VLLM_GPUS" >&2
     if [ "$OLLAMA_GPUS" != "$LOKEN_GPUS" ] || [ "$LOKEN_GPUS" != "$VLLM_GPUS" ]; then
-        printf '  ⚠️  engines were given DIFFERENT cards — cells from this run are not like-for-like\n' >&2
+        printf '  ⚠️  engines were given DIFFERENT cards - cells from this run are not like-for-like\n' >&2
     fi
 }

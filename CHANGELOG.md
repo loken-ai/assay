@@ -18,10 +18,10 @@ and versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html).
   end-to-end latency come from the client's clock rather than from whichever server happens
   to report a field, so no engine is measured through its own bookkeeping.
 - Energy labelled with the domains it covers. CPU and DRAM come from Linux powercap, so a run
-  elsewhere counts the GPU alone and its joules-per-token is a different quantity — the label
+  elsewhere counts the GPU alone and its joules-per-token is a different quantity - the label
   says which, and the comparison table will not subtract one from the other.
 - `scripts/gpu-policy.sh` and `scripts/fair-run.sh`: which cards each engine may use, written
-  once and applied to all three at launch, and the protocol around it — one engine at a time
+  once and applied to all three at launch, and the protocol around it - one engine at a time
   with the others stopped, cold restarts, a thermal gate, and the ollama pin derived from the
   weights against one card's capacity rather than fixed.
 - A coherence gate that runs on every cell without an expected answer, so a completion that
