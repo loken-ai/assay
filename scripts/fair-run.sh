@@ -131,8 +131,12 @@ if [ "$BENCH_MODE" = gpu ]; then
 fi
 _blob=$(blob_bytes_of "${_probe_model:-}")
 if [ "$BENCH_MODE" = gpu ] && [ -z "$GPU_PIN" ] && [ "$_one_card" -gt 0 ] && [ "$_blob" -gt "$_one_card" ]; then
+  # Read by the functions of gpu-policy.sh, sourced above, when each engine is launched.
+  # shellcheck disable=SC2034
   OLLAMA_GPUS=all             # one card cannot hold it: give every engine the machine
+  # shellcheck disable=SC2034
   LOKEN_GPUS=all
+  # shellcheck disable=SC2034
   VLLM_GPUS=all
   echo "  ⓘ $_probe_model weighs $((_blob/1000000000)) GB > one card ($((_one_card/1000000000)) GB) - every engine unpinned" >&2
 fi
@@ -277,6 +281,8 @@ engine_start() {
   local log="$LOGDIR/$n.log"
   kill_all
   mkdir -p "$LOGDIR"
+  # gpu_env_for prints KEY=VALUE words, and the split is the point.
+  # shellcheck disable=SC2046
   ( cd "${E_CWD[$n]:-$PWD}" \
     && env $(gpu_env_for "$n") ${E_ENV[$n]:-} nohup "${E_BIN[$n]}" ${E_ARGS[$n]:-} >"$log" 2>&1 & )
   wait_url "${E_PROBE[$n]}" "${E_WAIT[$n]:-60}" "${E_WANT[$n]:-}" \
