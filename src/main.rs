@@ -17,6 +17,7 @@ mod api;
 mod energy;
 mod gpu_sampler;
 mod host_sampler;
+mod provenance;
 mod stats;
 
 use api::{BenchClient, IterationMetrics, Protocol};
@@ -544,6 +545,24 @@ async fn main() {
         });
     }
 
+    // Asked of each server, rather than assumed from the flag that named it: a label says
+    // which flag was passed, not which build answered. Recorded verbatim, because every
+    // engine answers a different shape and a reader two years from now is better served by
+    // what the server said than by our translation of it.
+    let mut subjects = serde_json::Map::new();
+    if let Ok(probe) = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+    {
+        for t in &targets {
+            let said = provenance::engine_identity(&probe, &t.url).await;
+            subjects.insert(
+                t.label.clone(),
+                serde_json::json!({"url": t.url, "says": said}),
+            );
+        }
+    }
+
     // vLLM reports no prefill/decode timing split - without --stream the decode
     // rate is wall-clock-inflated by prefill. Warn so a non-stream vLLM run
     // isn't misread as a loss.
@@ -860,7 +879,7 @@ async fn main() {
 
     // JSON / CSV
     if let Some(ref path) = args.output {
-        save_json(path, &args, &all_cells, idle_energy.as_ref());
+        save_json(path, &args, &all_cells, idle_energy.as_ref(), &subjects);
     }
     if let Some(ref path) = args.output_csv {
         save_csv(path, &all_cells);
@@ -1600,7 +1619,13 @@ fn print_sweep_comparison(cells: &[CellResult], target_a: &ServerTarget, target_
 
 // JSON output -----------------------------------------------------------------
 
-fn save_json(path: &str, args: &Args, cells: &[CellResult], idle_energy: Option<&EnergyWindow>) {
+fn save_json(
+    path: &str,
+    args: &Args,
+    cells: &[CellResult],
+    idle_energy: Option<&EnergyWindow>,
+    subjects: &serde_json::Map<String, serde_json::Value>,
+) {
     let results: Vec<serde_json::Value> = cells
         .iter()
         .map(|c| {
@@ -1702,7 +1727,29 @@ fn save_json(path: &str, args: &Args, cells: &[CellResult], idle_energy: Option<
         .collect();
 
     let payload = serde_json::json!({
+        // Declared first, because a reader compares majors before anything else and refuses
+        // across them: a rule change is not a new column, it is a different measurement.
+        "schema": provenance::SCHEMA,
         "timestamp": chrono::Utc::now().to_rfc3339(),
+        // What produced the numbers. A rate from another driver, kernel or card is a
+        // different rate, and nothing else in this file would say so.
+        "machine": provenance::machine(),
+        "subjects": subjects,
+        "protocol": {
+            "iterations": args.iterations,
+            "warmup": args.warmup,
+            "streaming": args.stream,
+            "max_tokens": args.max_tokens,
+            "unique_prompt": args.unique_prompt,
+            "prefix_reuse_offered": args.session_id.is_some(),
+            // What this runner cannot yet assert about the conditions AROUND it: whether peer
+            // engines were stopped, which cards each was given, whether the cards were at idle.
+            // Null rather than false, so a reader can tell "not checked" from "checked and not
+            // so" - the scripts enforce these today and nothing writes down that they did.
+            "engines_alone": serde_json::Value::Null,
+            "cards_by_uuid": serde_json::Value::Null,
+            "thermal_gate_c": serde_json::Value::Null,
+        },
         "config": {
             "models": args.models,
             "num_ctx": args.num_ctx,
