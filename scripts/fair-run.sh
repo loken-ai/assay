@@ -415,5 +415,27 @@ fi
 kill_all
 # -- merge the per-engine results into one file -------------------------------
 mkdir -p "$(dirname "$OUT")"
-jq -s '{timestamp: .[0].timestamp, config: .[0].config, results: (map(.results) | add)}' "${PARTS[@]}" > "$OUT"
+# The envelope is rebuilt from the first part, so anything not named here is dropped. It
+# dropped the record of what produced the numbers - schema, machine, protocol - and the
+# idle baseline that is measured once for the whole run. The subjects are the exception:
+# each part knows its own engine, so they are merged rather than taken from one.
+#
+# The schema is checked rather than assumed: parts written by two different builds of the
+# tool are not one measurement, and merging them silently is how a table starts lying.
+jq -s '
+  (map(.schema) | unique) as $schemas
+  | if ($schemas | length) > 1 then
+      error("parts carry different schemas: \($schemas) - remeasure rather than merge")
+    else
+      {
+        schema: .[0].schema,
+        timestamp: .[0].timestamp,
+        machine: .[0].machine,
+        protocol: .[0].protocol,
+        subjects: (map(.subjects // {}) | add),
+        idle_energy_baseline: (map(.idle_energy_baseline) | map(select(. != null)) | first),
+        config: .[0].config,
+        results: (map(.results) | add),
+      }
+    end' "${PARTS[@]}" > "$OUT"
 echo "▶ merged ${#PARTS[@]} engine(s) -> $OUT"
