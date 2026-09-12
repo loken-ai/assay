@@ -34,3 +34,6 @@ perf.data*
 *~
 *.swp
 *.swo
+
+# Python bytecode from the scripts that import each other.
+__pycache__/
