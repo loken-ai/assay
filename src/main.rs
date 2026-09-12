@@ -549,6 +549,9 @@ async fn main() {
     // which flag was passed, not which build answered. Recorded verbatim, because every
     // engine answers a different shape and a reader two years from now is better served by
     // what the server said than by our translation of it.
+    // Read before the first request rather than at the end: what matters is the state the
+    // sweep began in, and by the time it is written the cards have been working for an hour.
+    let temps_at_start = provenance::gpu_temps_c();
     let mut subjects = serde_json::Map::new();
     if let Ok(probe) = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
@@ -879,7 +882,14 @@ async fn main() {
 
     // JSON / CSV
     if let Some(ref path) = args.output {
-        save_json(path, &args, &all_cells, idle_energy.as_ref(), &subjects);
+        save_json(
+            path,
+            &args,
+            &all_cells,
+            idle_energy.as_ref(),
+            &subjects,
+            &temps_at_start,
+        );
     }
     if let Some(ref path) = args.output_csv {
         save_csv(path, &all_cells);
@@ -1625,6 +1635,7 @@ fn save_json(
     cells: &[CellResult],
     idle_energy: Option<&EnergyWindow>,
     subjects: &serde_json::Map<String, serde_json::Value>,
+    temps_at_start: &[u32],
 ) {
     let results: Vec<serde_json::Value> = cells
         .iter()
@@ -1742,13 +1753,20 @@ fn save_json(
             "max_tokens": args.max_tokens,
             "unique_prompt": args.unique_prompt,
             "prefix_reuse_offered": args.session_id.is_some(),
-            // What this runner cannot yet assert about the conditions AROUND it: whether peer
-            // engines were stopped, which cards each was given, whether the cards were at idle.
-            // Null rather than false, so a reader can tell "not checked" from "checked and not
-            // so" - the scripts enforce these today and nothing writes down that they did.
-            "engines_alone": serde_json::Value::Null,
+            // Observed by the runner rather than asserted by whoever launched it. The
+            // protocol says one engine at a time on cards at idle, the scripts enforce it, and
+            // until now nothing wrote down that they had - so a report taken under the rule and
+            // one taken beside a running peer were the same file.
+            //
+            // Names and figures, not a verdict: "alone" is a judgement about which process was
+            // the target, and a reader can make it from a list they can check.
+            "engines_seen": provenance::engines_seen(),
+            "gpu_temps_c_at_start": temps_at_start,
+            // Still null, and deliberately. Which cards each ENGINE was given is decided by the
+            // launcher through the environment of a different process; this one can only see
+            // what it was shown itself, and filling the field with that would be a fiction
+            // dressed as a measurement. It is in `machine.gpus` for what it is worth.
             "cards_by_uuid": serde_json::Value::Null,
-            "thermal_gate_c": serde_json::Value::Null,
         },
         "config": {
             "models": args.models,

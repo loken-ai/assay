@@ -149,6 +149,63 @@ fn gpus() -> Vec<Gpu> {
         .collect()
 }
 
+/// The engine-shaped processes running on this machine, by name.
+///
+/// The protocol says one engine at a time with the others stopped, and the scripts enforce it.
+/// Nothing wrote down that they had, so a report taken under the rule and one taken beside a
+/// running peer were the same file. This is what the runner can see for itself: the names, as
+/// `/proc` gives them, of every process that could be serving a model.
+///
+/// Names rather than a verdict. "Alone" is a judgement about which of them was the target, and
+/// the reader can make it from a list they can check.
+pub fn engines_seen() -> Vec<String> {
+    const ENGINES: [&str; 4] = ["ollama", "lokend", "vllm", "llama-server"];
+    let Ok(dir) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut seen: Vec<String> = Vec::new();
+    for entry in dir.flatten() {
+        let path = entry.path();
+        let Some(pid) = path.file_name().and_then(|f| f.to_str()) else {
+            continue;
+        };
+        if !pid.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(comm) = std::fs::read_to_string(path.join("comm")) else {
+            continue;
+        };
+        let comm = comm.trim().to_string();
+        if ENGINES.contains(&comm.as_str()) && !seen.contains(&comm) {
+            seen.push(comm);
+        }
+    }
+    seen.sort();
+    seen
+}
+
+/// What the cards read before the first request, in whole degrees.
+///
+/// A card measured warm is a slower card, and the ordering of a sweep decides which engine gets
+/// the cold one. The harness gates on this; the record keeps what the gate let through, so a
+/// reader can see it rather than trust it.
+pub fn gpu_temps_c() -> Vec<u32> {
+    let Ok(nvml) = nvml_wrapper::Nvml::init() else {
+        return Vec::new();
+    };
+    let Ok(count) = nvml.device_count() else {
+        return Vec::new();
+    };
+    (0..count)
+        .filter_map(|index| {
+            nvml.device_by_index(index)
+                .ok()?
+                .temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu)
+                .ok()
+        })
+        .collect()
+}
+
 /// What a server says it is, asked of the server rather than assumed from a flag.
 ///
 /// Recorded verbatim: every engine answers a different shape, and the reader of a record two
