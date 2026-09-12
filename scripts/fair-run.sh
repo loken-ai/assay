@@ -433,6 +433,10 @@ jq -s '
         machine: .[0].machine,
         protocol: .[0].protocol,
         subjects: (map(.subjects // {}) | add),
+        # Stamped after the fact by campaign.sh, and read by bench_row.py to warn that a
+        # table mixes builds. Superseded by the commit each subject now carries, and carried
+        # through anyway: dropping a field the tooling reads is not an improvement.
+        engine_build: (map(.engine_build) | map(select(. != null)) | first),
         idle_energy_baseline: (map(.idle_energy_baseline) | map(select(. != null)) | first),
         config: .[0].config,
         results: (map(.results) | add),
