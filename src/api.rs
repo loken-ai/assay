@@ -228,10 +228,16 @@ pub struct IterationMetrics {
     /// Inter-token latencies in ms (gap between consecutive non-empty chunks).
     /// Only populated for streaming requests. Empty for non-streaming.
     pub inter_token_latencies_ms: Vec<f64>,
-    /// First ~120 chars of generated text. Used for the per-cell coherence
-    /// preview, so an answer that is fast and degenerate is not recorded as a fast one:
-    /// both produce an ordinary token rate and only the text tells them apart.
+    /// First ~120 chars of generated text. Shown after the cell completes, so a reader can
+    /// see what was answered; never judged, because 120 characters of a 500-character answer
+    /// is not the answer.
     pub response_preview: Option<String>,
+    /// Whether the WHOLE answer was a repeating pattern rather than an answer.
+    ///
+    /// Decided here, where the text is still complete, and carried rather than recomputed.
+    /// The gate used to run on `response_preview`: an answer that opened with a sentence and
+    /// then looped to the end passed, because the loop began past the cut.
+    pub degenerate: Option<bool>,
     /// Client wall-clock time (ms, from request start) of the first generated
     /// token. Marks the prefill->decode boundary so the energy sampler can
     /// isolate decode-phase energy (excluding prefill). Streaming only.
@@ -716,6 +722,7 @@ impl BenchClient {
             content_tokens: None, // non-streaming has no chunk count
             inter_token_latencies_ms: Vec::new(),
             response_preview: Some(truncate_preview(&body.response)),
+            degenerate: Some(crate::coherence::looks_degenerate(&body.response)),
             first_token_wall_ms: None, // non-streaming has no per-token timing
         })
     }
@@ -948,6 +955,7 @@ impl BenchClient {
             content_tokens: Some(token_count),
             inter_token_latencies_ms,
             response_preview: Some(truncate_preview(&text_acc)),
+            degenerate: Some(crate::coherence::looks_degenerate(&text_acc)),
             first_token_wall_ms: token_times_ms.first().copied(),
         })
     }
@@ -1039,6 +1047,7 @@ impl BenchClient {
             content_tokens: None,
             inter_token_latencies_ms: Vec::new(),
             response_preview: Some(truncate_preview(&text)),
+            degenerate: Some(crate::coherence::looks_degenerate(&text)),
             first_token_wall_ms: None, // non-streaming has no per-token timing
         })
     }
@@ -1171,6 +1180,7 @@ impl BenchClient {
             content_tokens: Some(token_count),
             inter_token_latencies_ms,
             response_preview: Some(truncate_preview(&text_acc)),
+            degenerate: Some(crate::coherence::looks_degenerate(&text_acc)),
             first_token_wall_ms: token_times_ms.first().copied(),
         })
     }
