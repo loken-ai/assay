@@ -326,6 +326,13 @@ struct CellResult<'a> {
     /// degenerate answer fails on its own shape, and `--require-substr` adds an
     /// expected-content gate on top when a caller supplies one.
     coherence_pass: Option<bool>,
+    /// Why the engine could not run the model, when it could not: the cell then holds no
+    /// iteration, and the table it feeds can say the engine was given the model rather than
+    /// leave the reader to guess whether it was tried.
+    load_error: Option<String>,
+    /// What each iteration that kept nothing said: a request the bench gave up on, one the
+    /// engine refused. Kept so a cell with no rate still says what happened to it.
+    iteration_errors: Vec<String>,
 }
 
 #[tokio::main]
@@ -554,10 +561,11 @@ async fn main() {
     };
 
     // Pre-flight: ensure every model exists on every target. Models that fail
-    // are recorded in `failed_models` and skipped during the sweep - we don't
-    // abort the entire run because of one missing model.
-    use std::collections::HashSet;
-    let mut failed_models: HashSet<(usize, String)> = HashSet::new();
+    // are recorded in `failed_models` with the reason and skipped during the
+    // sweep - we don't abort the entire run because of one missing model, and
+    // the sweep records the attempt as unloadable cells.
+    use std::collections::HashMap;
+    let mut failed_models: HashMap<(usize, String), String> = HashMap::new();
     for (i, target) in targets.iter().enumerate() {
         for model in &args.models {
             print!("  [{}] Ensuring model '{}'... ", target.label, model);
@@ -565,7 +573,7 @@ async fn main() {
                 Ok(()) => println!("ok"),
                 Err(e) => {
                     println!("FAILED: {} (skipping)", e);
-                    failed_models.insert((i, model.clone()));
+                    failed_models.insert((i, model.clone()), e.to_string());
                 }
             }
         }
@@ -576,7 +584,15 @@ async fn main() {
 
     for (idx, target) in targets.iter().enumerate() {
         for model in &args.models {
-            if failed_models.contains(&(idx, model.clone())) {
+            if let Some(reason) = failed_models.get(&(idx, model.clone())) {
+                all_cells.extend(unloadable_cells(
+                    target,
+                    model,
+                    &args.num_ctx,
+                    &prompt_specs,
+                    args.carbon_intensity,
+                    reason,
+                ));
                 continue;
             }
 
@@ -662,6 +678,14 @@ async fn main() {
                     }
                     Err(e) => {
                         println!("FAILED: {} (skipping)", e);
+                        all_cells.extend(unloadable_cells(
+                            target,
+                            model,
+                            &args.num_ctx,
+                            &prompt_specs,
+                            args.carbon_intensity,
+                            &e,
+                        ));
                         continue;
                     }
                 }
@@ -675,6 +699,14 @@ async fn main() {
                     }
                     Err(e) => {
                         println!("FAILED: {} (skipping)", e);
+                        all_cells.extend(unloadable_cells(
+                            target,
+                            model,
+                            &args.num_ctx,
+                            &prompt_specs,
+                            args.carbon_intensity,
+                            &e,
+                        ));
                         continue;
                     }
                 }
@@ -721,7 +753,7 @@ async fn main() {
     // Final cleanup
     for (j, _target) in targets.iter().enumerate() {
         for model in &args.models {
-            if failed_models.contains(&(j, model.clone())) {
+            if failed_models.contains_key(&(j, model.clone())) {
                 continue;
             }
             let _ = clients[j].unload_model(model).await;
@@ -1002,6 +1034,7 @@ async fn run_cell<'a>(
         target.label, iterations, mode
     );
     let mut all_metrics: Vec<IterationMetrics> = Vec::new();
+    let mut iteration_errors: Vec<String> = Vec::new();
     let mut all_gpu_samples: Vec<Vec<GpuSample>> = Vec::new();
     let mut all_host_samples: Vec<Option<HostSample>> = Vec::new();
     let mut all_energy: Vec<Option<EnergyWindow>> = Vec::new();
@@ -1225,6 +1258,7 @@ async fn run_cell<'a>(
                 // token count to pair with, and its window covers a request that did not run
                 // to completion, so it belongs in neither.
                 eprintln!("    #{}: ERROR -- {}", i + 1, e);
+                iteration_errors.push(format!("#{}: {e}", i + 1));
             }
         }
     }
@@ -1408,7 +1442,45 @@ async fn run_cell<'a>(
         stats,
         first_response_preview,
         coherence_pass,
+        load_error: None,
+        iteration_errors,
     }
+}
+
+/// One cell per (context, prompt) for a model the engine could not load: nothing measured,
+/// the reason kept, so the result names the engine that was given the model and failed.
+fn unloadable_cells<'a>(
+    target: &'a ServerTarget,
+    model: &str,
+    num_ctxs: &[usize],
+    prompts: &[(String, &str)],
+    carbon_intensity: f64,
+    reason: &str,
+) -> Vec<CellResult<'a>> {
+    num_ctxs
+        .iter()
+        .flat_map(|&num_ctx| {
+            prompts.iter().map(move |(name, text)| CellResult {
+                target,
+                model: model.to_string(),
+                model_fingerprint: None,
+                num_ctx,
+                prompt_name: name.clone(),
+                prompt_chars: text.len(),
+                iterations: Vec::new(),
+                gpu_samples_per_iter: Vec::new(),
+                host_samples_per_iter: Vec::new(),
+                energy_per_iter: Vec::new(),
+                carbon_intensity,
+                load_time_ms: None,
+                stats: Vec::new(),
+                first_response_preview: None,
+                coherence_pass: None,
+                load_error: Some(reason.to_string()),
+                iteration_errors: Vec::new(),
+            })
+        })
+        .collect()
 }
 
 /// Compact ITL summary for inline reporting (P50, P95).
@@ -1621,6 +1693,8 @@ fn save_json(
                 "load_time_ms": c.load_time_ms,
                 "first_response_preview": c.first_response_preview,
                 "coherence_pass": c.coherence_pass,
+                "load_error": c.load_error,
+                "iteration_errors": c.iteration_errors,
                 "stats": serde_json::Value::Object(stats_map),
                 "iterations": iterations_json,
             })

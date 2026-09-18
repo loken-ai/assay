@@ -649,7 +649,6 @@ impl BenchClient {
             .http
             .post(&url)
             .json(&req)
-            .timeout(Duration::from_secs(300))
             .send()
             .await
             .map_err(|e| format!("Generate request failed: {}", e))?;
@@ -675,11 +674,12 @@ impl BenchClient {
         if let Some(err) = body.as_server_error() {
             return Err(format!("server error: {}", err));
         }
-        // Completed response with zero generated tokens is also a failure - the server
-        // said "done" without emitting anything. Empty prompt requests (used for load/unload)
-        // hit a different code path and don't go through this function.
+        // A completed response with no token carries no rate to record. A model may end
+        // its answer on the first token - a bare instruction can read as a finished
+        // document - so the message states the fact, not a fault of the server. Empty
+        // prompt requests (used for load/unload) hit a different code path.
         if body.done && body.eval_count.unwrap_or(0) == 0 && body.response.is_empty() {
-            return Err("server returned done=true with 0 tokens generated".to_string());
+            return Err("the answer ended before its first token: no rate to record".to_string());
         }
 
         // Extract metrics from response (all durations in nanoseconds)
@@ -884,7 +884,7 @@ impl BenchClient {
             self.log_response_body(body);
         }
         if token_count == 0 {
-            return Err("streaming request returned 0 tokens (server silently failed)".to_string());
+            return Err("the answer ended before its first token: no rate to record".to_string());
         }
 
         let inter_token_latencies_ms: Vec<f64> =
@@ -994,7 +994,6 @@ impl BenchClient {
             .http
             .post(&url)
             .json(&req)
-            .timeout(Duration::from_secs(300))
             .send()
             .await
             .map_err(|e| format!("Completion request failed: {}", e))?;
@@ -1085,7 +1084,6 @@ impl BenchClient {
             .http
             .post(&url)
             .json(&req)
-            .timeout(Duration::from_secs(300))
             .send()
             .await
             .map_err(|e| format!("Stream request failed: {}", e))?;
