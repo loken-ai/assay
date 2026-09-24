@@ -25,6 +25,227 @@ pub enum Protocol {
     OpenAI,
 }
 
+/// What a cell measures - the workload, orthogonal to `Protocol` (the wire dialect). A text
+/// completion and an image generation both go to an OpenAI-dialect server but are measured by
+/// different clocks and judged by different gates, which is what this axis carries. The measuring
+/// side is told the modality; it does not guess it from the model name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Modality {
+    /// Prompt in, generated tokens out. The original path: tok/s, TTFT, ITL.
+    Text,
+    /// Text with an attached image (a caption or VQA). Same token metrics as `Text`.
+    Vision,
+    /// Prompt in, one image out (`/v1/images/generations`): latency and megapixels/s.
+    ImageGen,
+    /// Text in, audio out (`/v1/audio/speech`): latency and the real-time factor.
+    Tts,
+    /// Audio in, text out (`/v1/audio/transcriptions`): latency and word error rate.
+    Asr,
+    /// Prompt in, generated audio out (`/v1/audio/generations`): music or a sound effect.
+    /// Same audio clock as TTS - latency and the real-time factor - but the reply is a JSON
+    /// envelope with a base64 WAV, like image generation, not raw bytes.
+    Music,
+}
+
+/// What one image-generation request measured: how long it took, the image it produced, and a
+/// digest of the bytes so repeated runs can be checked for a deterministic pipeline the way the old
+/// `image_parity` script did. The pixel count is the requested size - the throughput a server is
+/// asked to deliver - not a re-decoded dimension, so it needs no image codec here.
+#[derive(Debug, Clone)]
+pub struct ImageMetrics {
+    pub wall_clock_ms: f64,
+    pub width: u32,
+    pub height: u32,
+    /// Millions of output pixels per second: the image analogue of decode tok/s.
+    pub megapixels_per_s: f64,
+    /// A digest of the decoded image bytes; equal across iterations means the pipeline is
+    /// deterministic. Not cryptographic - it answers "did the output change", nothing more.
+    pub digest: String,
+    pub bytes: usize,
+}
+
+/// Turn an `/v1/images/generations` reply and the wall time it took into metrics. Separate from the
+/// request so it is tested without a server. `size` is the requested `(width, height)`.
+pub fn image_metrics_from(
+    reply: &serde_json::Value,
+    wall_clock_ms: f64,
+    size: (u32, u32),
+) -> Result<ImageMetrics, String> {
+    use base64::Engine;
+    let b64 = reply
+        .get("data")
+        .and_then(|d| d.get(0))
+        .and_then(|e| e.get("b64_json"))
+        .and_then(|s| s.as_str())
+        .ok_or_else(|| {
+            let s = reply.to_string();
+            format!("no image in reply: {}", &s[..s.len().min(200)])
+        })?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| format!("b64 decode: {e}"))?;
+    let (width, height) = size;
+    let px = width as f64 * height as f64;
+    let megapixels_per_s = if wall_clock_ms > 0.0 {
+        px / 1e6 / (wall_clock_ms / 1000.0)
+    } else {
+        0.0
+    };
+    let digest = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut h);
+        format!("{:016x}", h.finish())
+    };
+    Ok(ImageMetrics {
+        wall_clock_ms,
+        width,
+        height,
+        megapixels_per_s,
+        digest,
+        bytes: bytes.len(),
+    })
+}
+
+/// What one text-to-speech request measured: how long it took and how much audio it produced. The
+/// headline number is the real-time factor - seconds of audio per second of wall time - which is to
+/// TTS what decode tok/s is to text.
+#[derive(Debug, Clone)]
+pub struct AudioMetrics {
+    pub wall_clock_ms: f64,
+    pub audio_seconds: f64,
+    /// Seconds of audio produced per second of wall time. Above 1.0 is faster than real time.
+    pub real_time_factor: f64,
+    pub bytes: usize,
+}
+
+/// Duration in seconds of a PCM WAV, read from its header - no audio codec needed. `None` if the
+/// bytes are not a WAV or the header is malformed. Reads the byte rate from the `fmt ` chunk and
+/// the `data` chunk size, walking the chunks so a `LIST`/`fact` before `data` does not fool it.
+pub fn wav_duration_seconds(bytes: &[u8]) -> Option<f64> {
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return None;
+    }
+    let le32 = |i: usize| -> Option<u32> {
+        bytes
+            .get(i..i + 4)
+            .map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+    };
+    let mut byte_rate: Option<u32> = None;
+    let mut data_size: Option<u32> = None;
+    let mut off = 12usize;
+    while off + 8 <= bytes.len() {
+        let id = &bytes[off..off + 4];
+        let sz = le32(off + 4)? as usize;
+        let body = off + 8;
+        if id == b"fmt " {
+            byte_rate = le32(body + 8); // fmt: format(2) channels(2) rate(4) byte_rate(4)...
+        } else if id == b"data" {
+            data_size = Some(sz as u32);
+            break;
+        }
+        off = body + sz + (sz & 1); // chunks are word-aligned
+    }
+    let br = byte_rate? as f64;
+    let ds = data_size? as f64;
+    if br <= 0.0 {
+        return None;
+    }
+    Some(ds / br)
+}
+
+/// Turn a TTS audio reply and the wall time it took into metrics. Separate from the request so it is
+/// tested without a server; expects a WAV (assay asks for `response_format: "wav"`).
+pub fn tts_metrics_from(audio: &[u8], wall_clock_ms: f64) -> Result<AudioMetrics, String> {
+    let audio_seconds = wav_duration_seconds(audio)
+        .ok_or_else(|| format!("reply is not a parseable WAV ({} bytes)", audio.len()))?;
+    let wall_s = wall_clock_ms / 1000.0;
+    let real_time_factor = if wall_s > 0.0 {
+        audio_seconds / wall_s
+    } else {
+        0.0
+    };
+    Ok(AudioMetrics {
+        wall_clock_ms,
+        audio_seconds,
+        real_time_factor,
+        bytes: audio.len(),
+    })
+}
+
+/// What one speech-recognition request measured: latency, the audio it was given, the real-time
+/// factor, the transcript, and - when a reference was supplied - the word error rate.
+#[derive(Debug, Clone)]
+pub struct AsrMetrics {
+    pub wall_clock_ms: f64,
+    pub audio_seconds: f64,
+    /// Seconds of audio transcribed per second of wall time. Above 1.0 is faster than real time.
+    pub real_time_factor: f64,
+    /// Word error rate against the reference, in `[0, 1+]`; `None` when no reference was given.
+    pub wer: Option<f64>,
+    pub transcript: String,
+}
+
+/// Word error rate of `hypothesis` against `reference`: the word-level edit distance over the
+/// reference length. Both are lowercased and stripped of punctuation first, the usual WER
+/// normalization, so casing and a trailing period do not count as errors.
+pub fn word_error_rate(hypothesis: &str, reference: &str) -> f64 {
+    fn words(s: &str) -> Vec<String> {
+        s.to_lowercase()
+            .split_whitespace()
+            .map(|w| {
+                w.chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .collect::<String>()
+            })
+            .filter(|w| !w.is_empty())
+            .collect()
+    }
+    let h = words(hypothesis);
+    let r = words(reference);
+    if r.is_empty() {
+        return if h.is_empty() { 0.0 } else { 1.0 };
+    }
+    // Levenshtein over word sequences, two rolling rows.
+    let mut prev: Vec<usize> = (0..=h.len()).collect();
+    let mut cur = vec![0usize; h.len() + 1];
+    for (i, rw) in r.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, hw) in h.iter().enumerate() {
+            let cost = usize::from(rw != hw);
+            cur[j + 1] = (prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[h.len()] as f64 / r.len() as f64
+}
+
+/// Assemble ASR metrics from a transcript, the wall time, the input audio (for its duration), and an
+/// optional reference transcript (for the word error rate). Separate from the request so it tests
+/// without a server.
+pub fn asr_metrics_from(
+    transcript: String,
+    wall_clock_ms: f64,
+    input_audio: &[u8],
+    reference: Option<&str>,
+) -> AsrMetrics {
+    let audio_seconds = wav_duration_seconds(input_audio).unwrap_or(0.0);
+    let wall_s = wall_clock_ms / 1000.0;
+    let real_time_factor = if wall_s > 0.0 {
+        audio_seconds / wall_s
+    } else {
+        0.0
+    };
+    let wer = reference.map(|r| word_error_rate(&transcript, r));
+    AsrMetrics {
+        wall_clock_ms,
+        audio_seconds,
+        real_time_factor,
+        wer,
+        transcript,
+    }
+}
+
 /// Ollama generate request (POST /api/generate)
 #[derive(Debug, Clone, Serialize)]
 pub struct GenerateRequest {
@@ -276,6 +497,182 @@ impl BenchClient {
     /// Force `num_gpu` in the Ollama options (e.g. 0 for a CPU-only bench).
     pub fn set_num_gpu(&mut self, num_gpu: Option<usize>) {
         self.num_gpu = num_gpu;
+    }
+
+    /// Generate one image and time it end to end. `size` is `(width, height)`; `seed` fixes the
+    /// pipeline so repeated runs can be checked for determinism. OpenAI dialect
+    /// (`POST /v1/images/generations`), which loken and image-serving vLLM both speak.
+    pub async fn generate_image(
+        &self,
+        model: &str,
+        prompt: &str,
+        size: (u32, u32),
+        seed: u64,
+    ) -> Result<ImageMetrics, String> {
+        let url = format!("{}/v1/images/generations", self.base_url);
+        let body = serde_json::json!({
+            "model": model,
+            "prompt": prompt,
+            "size": format!("{}x{}", size.0, size.1),
+            "n": 1,
+            "seed": seed,
+            "response_format": "b64_json",
+        });
+        self.log_request("POST", &url, &body);
+        let t0 = Instant::now();
+        let resp = self
+            .http
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("image request: {e}"))?;
+        let status = resp.status();
+        self.log_response_status(&url, status);
+        let reply: serde_json::Value =
+            resp.json().await.map_err(|e| format!("image reply: {e}"))?;
+        let wall_clock_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        if !status.is_success() {
+            let s = reply.to_string();
+            return Err(format!("image {status}: {}", &s[..s.len().min(200)]));
+        }
+        image_metrics_from(&reply, wall_clock_ms, size)
+    }
+
+    /// Synthesize speech and time it end to end. `input` is the text to speak, `voice` the named
+    /// voice. OpenAI dialect (`POST /v1/audio/speech`), asking for WAV so the duration is readable
+    /// from the header. Returns the real-time factor and how much audio came back.
+    pub async fn generate_tts(
+        &self,
+        model: &str,
+        input: &str,
+        voice: &str,
+    ) -> Result<AudioMetrics, String> {
+        let url = format!("{}/v1/audio/speech", self.base_url);
+        let body = serde_json::json!({
+            "model": model,
+            "input": input,
+            "voice": voice,
+            "response_format": "wav",
+        });
+        self.log_request("POST", &url, &body);
+        let t0 = Instant::now();
+        let resp = self
+            .http
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("tts request: {e}"))?;
+        let status = resp.status();
+        self.log_response_status(&url, status);
+        let audio = resp.bytes().await.map_err(|e| format!("tts reply: {e}"))?;
+        let wall_clock_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        if !status.is_success() {
+            let n = audio.len().min(200);
+            return Err(format!(
+                "tts {status}: {}",
+                String::from_utf8_lossy(&audio[..n])
+            ));
+        }
+        tts_metrics_from(&audio, wall_clock_ms)
+    }
+
+    /// Generate music or a sound effect from a text prompt and time it end to end
+    /// (`POST /v1/audio/generations`). Unlike TTS, the reply is a JSON envelope carrying a
+    /// base64 WAV in `data[0].b64_json` (the image-generation shape), decoded here so the
+    /// duration - and thus the real-time factor - is read from the WAV header. `seconds` asks
+    /// the server for a fixed clip length so the throughput is measured against a known target.
+    pub async fn generate_music(
+        &self,
+        model: &str,
+        prompt: &str,
+        seconds: f64,
+    ) -> Result<AudioMetrics, String> {
+        use base64::Engine;
+        let url = format!("{}/v1/audio/generations", self.base_url);
+        let body = serde_json::json!({
+            "model": model,
+            "prompt": prompt,
+            "seconds": seconds,
+            "seed": 0,
+        });
+        self.log_request("POST", &url, &body);
+        let t0 = Instant::now();
+        let resp = self
+            .http
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("music request: {e}"))?;
+        let status = resp.status();
+        self.log_response_status(&url, status);
+        let reply: serde_json::Value =
+            resp.json().await.map_err(|e| format!("music reply: {e}"))?;
+        let wall_clock_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        if !status.is_success() {
+            let s = reply.to_string();
+            return Err(format!("music {status}: {}", &s[..s.len().min(200)]));
+        }
+        let b64 = reply
+            .get("data")
+            .and_then(|d| d.get(0))
+            .and_then(|e| e.get("b64_json"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "music reply has no data[0].b64_json".to_string())?;
+        let wav = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|e| format!("music reply b64 decode: {e}"))?;
+        tts_metrics_from(&wav, wall_clock_ms)
+    }
+
+    /// Transcribe `audio` and time it end to end. OpenAI dialect (`POST /v1/audio/transcriptions`),
+    /// a multipart form with the audio as `file` and the model as `model`; the reply is
+    /// `{ "text": ... }`. Returns `(transcript, wall_clock_ms)`; WER is computed by the caller
+    /// against a reference it holds.
+    pub async fn generate_asr(
+        &self,
+        model: &str,
+        audio: &[u8],
+        filename: &str,
+    ) -> Result<(String, f64), String> {
+        let url = format!("{}/v1/audio/transcriptions", self.base_url);
+        let part = reqwest::multipart::Part::bytes(audio.to_vec())
+            .file_name(filename.to_string())
+            .mime_str("audio/wav")
+            .map_err(|e| format!("asr part: {e}"))?;
+        let form = reqwest::multipart::Form::new()
+            .text("model", model.to_string())
+            .part("file", part);
+        if self.verbose {
+            eprintln!("    --> POST {url} (multipart file={} bytes)", audio.len());
+        }
+        let t0 = Instant::now();
+        let resp = self
+            .http
+            .post(&url)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| format!("asr request: {e}"))?;
+        let status = resp.status();
+        self.log_response_status(&url, status);
+        let reply: serde_json::Value = resp.json().await.map_err(|e| format!("asr reply: {e}"))?;
+        let wall_clock_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        if !status.is_success() {
+            let s = reply.to_string();
+            return Err(format!("asr {status}: {}", &s[..s.len().min(200)]));
+        }
+        let transcript = reply
+            .get("text")
+            .and_then(|t| t.as_str())
+            .ok_or_else(|| {
+                let s = reply.to_string();
+                format!("no transcript in reply: {}", &s[..s.len().min(200)])
+            })?
+            .to_string();
+        Ok((transcript, wall_clock_ms))
     }
 
     fn log_request(&self, method: &str, url: &str, body: &impl Serialize) {
@@ -1221,4 +1618,86 @@ fn steady_decode_tok_s(token_times_ms: &[f64]) -> Option<f64> {
 fn has_nonempty_field(line: &str, field_pat: &str) -> bool {
     line.find(field_pat)
         .is_some_and(|i| line.as_bytes().get(i + field_pat.len()) != Some(&b'"'))
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+
+    #[test]
+    fn image_metrics_read_a_reply_and_are_deterministic() {
+        use base64::Engine;
+        let raw = b"some decoded image bytes";
+        let b64 = base64::engine::general_purpose::STANDARD.encode(raw);
+        let reply = serde_json::json!({ "data": [ { "b64_json": b64 } ] });
+        let m = image_metrics_from(&reply, 500.0, (64, 64)).unwrap();
+        assert_eq!(m.bytes, raw.len());
+        assert_eq!((m.width, m.height), (64, 64));
+        // 64*64 px over 0.5 s, in megapixels/s.
+        assert!((m.megapixels_per_s - (4096.0 / 1e6 / 0.5)).abs() < 1e-9);
+        // Same bytes -> same digest.
+        let again = image_metrics_from(&reply, 500.0, (64, 64)).unwrap();
+        assert_eq!(m.digest, again.digest);
+        // A reply with no image errors rather than panics.
+        assert!(image_metrics_from(&serde_json::json!({ "data": [] }), 500.0, (64, 64)).is_err());
+    }
+
+    #[test]
+    fn tts_metrics_read_a_wav_duration_and_rtf() {
+        // A 1-second mono 16-bit 8000 Hz WAV: byte_rate = 8000*1*2, data = byte_rate bytes.
+        let (rate, channels, bits) = (8000u32, 1u16, 16u16);
+        let byte_rate = rate * channels as u32 * (bits as u32 / 8);
+        let data_size = byte_rate; // one second
+        let mut w = Vec::new();
+        w.extend_from_slice(b"RIFF");
+        w.extend_from_slice(&(36 + data_size).to_le_bytes());
+        w.extend_from_slice(b"WAVE");
+        w.extend_from_slice(b"fmt ");
+        w.extend_from_slice(&16u32.to_le_bytes());
+        w.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        w.extend_from_slice(&channels.to_le_bytes());
+        w.extend_from_slice(&rate.to_le_bytes());
+        w.extend_from_slice(&byte_rate.to_le_bytes());
+        w.extend_from_slice(&(channels * bits / 8).to_le_bytes());
+        w.extend_from_slice(&bits.to_le_bytes());
+        w.extend_from_slice(b"data");
+        w.extend_from_slice(&data_size.to_le_bytes());
+        w.resize(w.len() + data_size as usize, 0);
+        let m = tts_metrics_from(&w, 500.0).unwrap();
+        assert!((m.audio_seconds - 1.0).abs() < 1e-6);
+        // one second of audio produced in half a second of wall time.
+        assert!((m.real_time_factor - 2.0).abs() < 1e-6);
+        assert!(tts_metrics_from(b"not a wav at all", 500.0).is_err());
+    }
+
+    #[test]
+    fn word_error_rate_counts_substitutions_insertions_deletions() {
+        // Identical (bar case/punctuation) is zero error.
+        assert!(
+            (word_error_rate("The quick brown fox.", "the quick brown fox") - 0.0).abs() < 1e-9
+        );
+        // One substitution over four reference words.
+        assert!((word_error_rate("the quick red fox", "the quick brown fox") - 0.25).abs() < 1e-9);
+        // One deletion over four.
+        assert!((word_error_rate("the quick fox", "the quick brown fox") - 0.25).abs() < 1e-9);
+        // Empty hypothesis against a four-word reference is total error.
+        assert!((word_error_rate("", "the quick brown fox") - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn asr_metrics_carry_wer_when_a_reference_is_given() {
+        let m = asr_metrics_from(
+            "hello world".to_string(),
+            1000.0,
+            b"not a wav",
+            Some("hello there"),
+        );
+        assert_eq!(m.transcript, "hello world");
+        // One substitution over two words.
+        assert_eq!(m.wer, Some(0.5));
+        // No reference -> no WER, and a non-WAV input yields zero audio seconds, not a panic.
+        let m2 = asr_metrics_from("x".to_string(), 1000.0, b"not a wav", None);
+        assert_eq!(m2.wer, None);
+        assert_eq!(m2.audio_seconds, 0.0);
+    }
 }

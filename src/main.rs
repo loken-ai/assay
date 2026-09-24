@@ -21,7 +21,7 @@ mod host_sampler;
 mod provenance;
 mod stats;
 
-use api::{BenchClient, IterationMetrics, Protocol};
+use api::{BenchClient, IterationMetrics, Modality, Protocol};
 use clap::Parser;
 use energy::{EnergySampler, EnergyWindow};
 use gpu_sampler::{GpuSample, GpuSampler};
@@ -247,6 +247,22 @@ struct Args {
     #[arg(long)]
     image: Option<String>,
 
+    /// What the listed models are, so the cell is measured by the right clock: `text` (default),
+    /// `vision`, `image` (generation), `tts`, or `asr`. The driver derives it from what loken
+    /// declares and passes it; assay does not guess it from the model name.
+    #[arg(long, default_value = "text")]
+    modality: String,
+
+    /// The audio file an `--modality asr` cell transcribes (a WAV, so its duration is read for the
+    /// real-time factor). The driver points it at a golden sample.
+    #[arg(long)]
+    audio: Option<String>,
+
+    /// The ground-truth transcript for an `--modality asr` cell, used for the word error rate.
+    /// Without it the cell still reports latency and the real-time factor, just no WER.
+    #[arg(long)]
+    reference: Option<String>,
+
     /// Coherence-gate substring. After every cell prints, if --image and
     /// --require-substr are both set, fail any iteration whose response
     /// preview doesn't contain (case-insensitive) at least one of the
@@ -411,6 +427,22 @@ async fn main() {
                 }
             }
         }
+        None => None,
+    };
+
+    // The audio an ASR cell transcribes, read once. Failing to read a path the caller gave is an
+    // error, not a silent text run.
+    let asr_audio: Option<Vec<u8>> = match args.audio.as_deref() {
+        Some(path) => match std::fs::read(path) {
+            Ok(bytes) => {
+                println!("  Audio:      {} ({} bytes)", path, bytes.len());
+                Some(bytes)
+            }
+            Err(e) => {
+                eprintln!("Error: failed to read --audio {}: {}", path, e);
+                std::process::exit(1);
+            }
+        },
         None => None,
     };
 
@@ -720,30 +752,117 @@ async fn main() {
                         target.label, model, num_ctx, prompt_name
                     );
 
-                    let cell = run_cell(
-                        &clients[idx],
-                        target,
-                        model,
-                        num_ctx,
-                        prompt_name,
-                        prompt_text,
-                        args.unique_prompt,
-                        args.max_tokens,
-                        args.iterations,
-                        args.concurrency,
-                        args.warmup,
-                        args.stream,
-                        !args.no_gpu_sample,
-                        args.gpu_sample_interval_ms,
-                        !args.no_energy,
-                        args.carbon_intensity,
-                        load_time,
-                        image_b64.as_deref(),
-                        &args.require_substr,
-                        args.session_id.as_deref(),
-                        &args.host_proc_names,
-                    )
-                    .await;
+                    let cell = match parse_modality(&args.modality) {
+                        Modality::ImageGen => {
+                            run_image_cell(
+                                &clients[idx],
+                                target,
+                                model,
+                                num_ctx,
+                                prompt_name,
+                                prompt_text,
+                                args.iterations,
+                                args.warmup,
+                                args.carbon_intensity,
+                            )
+                            .await
+                        }
+                        Modality::Music => {
+                            run_music_cell(
+                                &clients[idx],
+                                target,
+                                model,
+                                num_ctx,
+                                prompt_name,
+                                prompt_text,
+                                args.iterations,
+                                args.warmup,
+                                args.carbon_intensity,
+                            )
+                            .await
+                        }
+                        Modality::Tts => {
+                            run_tts_cell(
+                                &clients[idx],
+                                target,
+                                model,
+                                num_ctx,
+                                prompt_name,
+                                prompt_text,
+                                args.iterations,
+                                args.warmup,
+                                args.carbon_intensity,
+                            )
+                            .await
+                        }
+                        Modality::Asr => match &asr_audio {
+                            Some(audio) => {
+                                run_asr_cell(
+                                    &clients[idx],
+                                    target,
+                                    model,
+                                    num_ctx,
+                                    prompt_name,
+                                    prompt_text.len(),
+                                    args.iterations,
+                                    args.warmup,
+                                    args.carbon_intensity,
+                                    audio,
+                                    args.reference.as_deref(),
+                                )
+                                .await
+                            }
+                            // ASR without audio is a configuration error, said as an error cell
+                            // rather than a silent text run.
+                            None => CellResult {
+                                target,
+                                model: model.to_string(),
+                                model_fingerprint: None,
+                                num_ctx,
+                                prompt_name: prompt_name.to_string(),
+                                prompt_chars: prompt_text.len(),
+                                iterations: Vec::new(),
+                                gpu_samples_per_iter: Vec::new(),
+                                host_samples_per_iter: Vec::new(),
+                                energy_per_iter: Vec::new(),
+                                carbon_intensity: args.carbon_intensity,
+                                load_time_ms: None,
+                                stats: Vec::new(),
+                                first_response_preview: None,
+                                coherence_pass: None,
+                                load_error: Some("asr modality requires --audio".to_string()),
+                                iteration_errors: Vec::new(),
+                            },
+                        },
+                        // Text and vision keep the token path (vision rides it with an attached
+                        // image).
+                        _ => {
+                            run_cell(
+                                &clients[idx],
+                                target,
+                                model,
+                                num_ctx,
+                                prompt_name,
+                                prompt_text,
+                                args.unique_prompt,
+                                args.max_tokens,
+                                args.iterations,
+                                args.concurrency,
+                                args.warmup,
+                                args.stream,
+                                !args.no_gpu_sample,
+                                args.gpu_sample_interval_ms,
+                                !args.no_energy,
+                                args.carbon_intensity,
+                                load_time,
+                                image_b64.as_deref(),
+                                &args.require_substr,
+                                args.session_id.as_deref(),
+                                &args.host_proc_names,
+                            )
+                            .await
+                        }
+                    };
                     all_cells.push(cell);
                 }
             }
@@ -1449,6 +1568,432 @@ async fn run_cell<'a>(
 
 /// One cell per (context, prompt) for a model the engine could not load: nothing measured,
 /// the reason kept, so the result names the engine that was given the model and failed.
+/// The `--modality` string as the enum. An unknown value is a text cell, the safe default.
+fn parse_modality(s: &str) -> Modality {
+    match s.to_ascii_lowercase().as_str() {
+        "vision" => Modality::Vision,
+        "image" | "imagegen" | "image-gen" => Modality::ImageGen,
+        "tts" | "speech" => Modality::Tts,
+        "music" | "sfx" | "audiogen" | "audio-gen" => Modality::Music,
+        "asr" | "transcribe" => Modality::Asr,
+        _ => Modality::Text,
+    }
+}
+
+/// Measure an image-generation model: warm once, then `iterations` timed generations at a fixed
+/// seed, reporting latency, megapixels/s, and whether the pipeline was deterministic (every
+/// iteration produced byte-identical output). No tok/s here - the stat labels carry the modality,
+/// so the report files it as an image cell rather than a text one.
+#[allow(clippy::too_many_arguments)]
+async fn run_image_cell<'a>(
+    client: &BenchClient,
+    target: &'a ServerTarget,
+    model: &str,
+    num_ctx: usize,
+    prompt_name: &str,
+    prompt: &str,
+    iterations: usize,
+    warmup: usize,
+    carbon_intensity: f64,
+) -> CellResult<'a> {
+    const SIZE: (u32, u32) = (1024, 1024);
+    const SEED: u64 = 42;
+    println!(
+        "  [{}] Image generation, {} iteration(s)...",
+        target.label, iterations
+    );
+    for _ in 0..warmup {
+        let _ = client.generate_image(model, prompt, SIZE, SEED).await;
+    }
+    let mut latencies = Vec::new();
+    let mut mpps = Vec::new();
+    let mut digests = Vec::new();
+    let mut errors = Vec::new();
+    let mut preview: Option<String> = None;
+    for i in 0..iterations {
+        match client.generate_image(model, prompt, SIZE, SEED).await {
+            Ok(m) => {
+                println!(
+                    "    #{}: {:.0} ms, {:.2} MP/s",
+                    i + 1,
+                    m.wall_clock_ms,
+                    m.megapixels_per_s
+                );
+                if preview.is_none() {
+                    preview = Some(format!(
+                        "{}x{} image, {} B, digest {}",
+                        m.width, m.height, m.bytes, m.digest
+                    ));
+                }
+                latencies.push(m.wall_clock_ms);
+                mpps.push(m.megapixels_per_s);
+                digests.push(m.digest);
+            }
+            Err(e) => {
+                println!("    #{}: ERR {e}", i + 1);
+                errors.push(e);
+            }
+        }
+    }
+    // A fixed seed should give byte-identical images across iterations.
+    let deterministic = digests.len() >= 2 && digests.iter().all(|d| d == &digests[0]);
+    let coherence_pass = if digests.is_empty() {
+        None
+    } else {
+        Some(deterministic || digests.len() == 1)
+    };
+    if digests.len() >= 2 && !deterministic {
+        println!("    [coherence] FAIL - a fixed seed produced different images across iterations");
+    }
+    let mut stats = Vec::new();
+    if let Some(s) = Stats::compute("Image latency", "ms", &latencies) {
+        stats.push(s);
+    }
+    if let Some(s) = Stats::compute("Megapixels/s", "MP/s", &mpps) {
+        stats.push(s);
+    }
+    let load_error = if latencies.is_empty() {
+        Some(
+            errors
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "no image produced".to_string()),
+        )
+    } else {
+        None
+    };
+    CellResult {
+        target,
+        model: model.to_string(),
+        model_fingerprint: None,
+        num_ctx,
+        prompt_name: prompt_name.to_string(),
+        prompt_chars: prompt.len(),
+        iterations: Vec::new(),
+        gpu_samples_per_iter: Vec::new(),
+        host_samples_per_iter: Vec::new(),
+        energy_per_iter: Vec::new(),
+        carbon_intensity,
+        load_time_ms: None,
+        stats,
+        first_response_preview: preview,
+        coherence_pass,
+        load_error,
+        iteration_errors: errors,
+    }
+}
+
+/// Measure a music or sound-effect generator: warm once, then `iterations` timed generations of a
+/// fixed-length clip from the same prompt, reporting latency, the real-time factor, and the seconds
+/// of audio produced. The cell is coherent if it produced audio at all (not empty or near-silent).
+/// Loken-only in practice: ollama and vLLM do not serve `/v1/audio/generations`.
+#[allow(clippy::too_many_arguments)]
+async fn run_music_cell<'a>(
+    client: &BenchClient,
+    target: &'a ServerTarget,
+    model: &str,
+    num_ctx: usize,
+    prompt_name: &str,
+    prompt: &str,
+    iterations: usize,
+    warmup: usize,
+    carbon_intensity: f64,
+) -> CellResult<'a> {
+    const SECONDS: f64 = 5.0;
+    println!(
+        "  [{}] Text-to-music ({SECONDS:.0}s clip), {} iteration(s)...",
+        target.label, iterations
+    );
+    for _ in 0..warmup {
+        let _ = client.generate_music(model, prompt, SECONDS).await;
+    }
+    let mut latencies = Vec::new();
+    let mut rtfs = Vec::new();
+    let mut audio_s = Vec::new();
+    let mut errors = Vec::new();
+    let mut preview: Option<String> = None;
+    for i in 0..iterations {
+        match client.generate_music(model, prompt, SECONDS).await {
+            Ok(m) => {
+                println!(
+                    "    #{}: {:.0} ms, {:.2}s audio, RTF {:.2}",
+                    i + 1,
+                    m.wall_clock_ms,
+                    m.audio_seconds,
+                    m.real_time_factor
+                );
+                if preview.is_none() {
+                    preview = Some(format!("{:.2}s audio, {} B", m.audio_seconds, m.bytes));
+                }
+                latencies.push(m.wall_clock_ms);
+                rtfs.push(m.real_time_factor);
+                audio_s.push(m.audio_seconds);
+            }
+            Err(e) => {
+                println!("    #{}: ERR {e}", i + 1);
+                errors.push(e);
+            }
+        }
+    }
+    let produced = audio_s.iter().any(|s| *s > 0.05);
+    let coherence_pass = if audio_s.is_empty() {
+        None
+    } else {
+        Some(produced)
+    };
+    if !audio_s.is_empty() && !produced {
+        println!("    [coherence] FAIL - the audio was empty or near-silent");
+    }
+    let mut stats = Vec::new();
+    if let Some(s) = Stats::compute("Music latency", "ms", &latencies) {
+        stats.push(s);
+    }
+    if let Some(s) = Stats::compute("Real-time factor", "x", &rtfs) {
+        stats.push(s);
+    }
+    if let Some(s) = Stats::compute("Audio seconds", "s", &audio_s) {
+        stats.push(s);
+    }
+    let load_error = if latencies.is_empty() {
+        Some(
+            errors
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "no audio produced".to_string()),
+        )
+    } else {
+        None
+    };
+    CellResult {
+        target,
+        model: model.to_string(),
+        model_fingerprint: None,
+        num_ctx,
+        prompt_name: prompt_name.to_string(),
+        prompt_chars: prompt.len(),
+        iterations: Vec::new(),
+        gpu_samples_per_iter: Vec::new(),
+        host_samples_per_iter: Vec::new(),
+        energy_per_iter: Vec::new(),
+        carbon_intensity,
+        load_time_ms: None,
+        stats,
+        first_response_preview: preview,
+        coherence_pass,
+        load_error,
+        iteration_errors: errors,
+    }
+}
+
+/// Measure a text-to-speech model: warm once, then `iterations` timed syntheses of the prompt,
+/// reporting latency, the real-time factor (seconds of audio per second of wall time), and how much
+/// audio came back. The cell is coherent if it produced non-trivial audio, not silence.
+#[allow(clippy::too_many_arguments)]
+async fn run_tts_cell<'a>(
+    client: &BenchClient,
+    target: &'a ServerTarget,
+    model: &str,
+    num_ctx: usize,
+    prompt_name: &str,
+    prompt: &str,
+    iterations: usize,
+    warmup: usize,
+    carbon_intensity: f64,
+) -> CellResult<'a> {
+    const VOICE: &str = "alloy";
+    println!(
+        "  [{}] Text-to-speech, {} iteration(s)...",
+        target.label, iterations
+    );
+    for _ in 0..warmup {
+        let _ = client.generate_tts(model, prompt, VOICE).await;
+    }
+    let mut latencies = Vec::new();
+    let mut rtfs = Vec::new();
+    let mut audio_s = Vec::new();
+    let mut errors = Vec::new();
+    let mut preview: Option<String> = None;
+    for i in 0..iterations {
+        match client.generate_tts(model, prompt, VOICE).await {
+            Ok(m) => {
+                println!(
+                    "    #{}: {:.0} ms, {:.2}s audio, RTF {:.2}",
+                    i + 1,
+                    m.wall_clock_ms,
+                    m.audio_seconds,
+                    m.real_time_factor
+                );
+                if preview.is_none() {
+                    preview = Some(format!("{:.2}s audio, {} B", m.audio_seconds, m.bytes));
+                }
+                latencies.push(m.wall_clock_ms);
+                rtfs.push(m.real_time_factor);
+                audio_s.push(m.audio_seconds);
+            }
+            Err(e) => {
+                println!("    #{}: ERR {e}", i + 1);
+                errors.push(e);
+            }
+        }
+    }
+    let produced = audio_s.iter().any(|s| *s > 0.05);
+    let coherence_pass = if audio_s.is_empty() {
+        None
+    } else {
+        Some(produced)
+    };
+    if !audio_s.is_empty() && !produced {
+        println!("    [coherence] FAIL - the audio was empty or near-silent");
+    }
+    let mut stats = Vec::new();
+    if let Some(s) = Stats::compute("TTS latency", "ms", &latencies) {
+        stats.push(s);
+    }
+    if let Some(s) = Stats::compute("Real-time factor", "x", &rtfs) {
+        stats.push(s);
+    }
+    if let Some(s) = Stats::compute("Audio seconds", "s", &audio_s) {
+        stats.push(s);
+    }
+    let load_error = if latencies.is_empty() {
+        Some(
+            errors
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "no audio produced".to_string()),
+        )
+    } else {
+        None
+    };
+    CellResult {
+        target,
+        model: model.to_string(),
+        model_fingerprint: None,
+        num_ctx,
+        prompt_name: prompt_name.to_string(),
+        prompt_chars: prompt.len(),
+        iterations: Vec::new(),
+        gpu_samples_per_iter: Vec::new(),
+        host_samples_per_iter: Vec::new(),
+        energy_per_iter: Vec::new(),
+        carbon_intensity,
+        load_time_ms: None,
+        stats,
+        first_response_preview: preview,
+        coherence_pass,
+        load_error,
+        iteration_errors: errors,
+    }
+}
+
+/// Measure a speech-recognition model: warm once, then `iterations` timed transcriptions of the
+/// same audio, reporting latency, the real-time factor, and - when a reference is given - the word
+/// error rate. The cell is coherent if it produced a transcript at all.
+#[allow(clippy::too_many_arguments)]
+async fn run_asr_cell<'a>(
+    client: &BenchClient,
+    target: &'a ServerTarget,
+    model: &str,
+    num_ctx: usize,
+    prompt_name: &str,
+    prompt_chars: usize,
+    iterations: usize,
+    warmup: usize,
+    carbon_intensity: f64,
+    audio: &[u8],
+    reference: Option<&str>,
+) -> CellResult<'a> {
+    println!(
+        "  [{}] Speech recognition, {} iteration(s)...",
+        target.label, iterations
+    );
+    for _ in 0..warmup {
+        let _ = client.generate_asr(model, audio, "audio.wav").await;
+    }
+    let mut latencies = Vec::new();
+    let mut rtfs = Vec::new();
+    let mut audio_secs = Vec::new();
+    let mut wers = Vec::new();
+    let mut errors = Vec::new();
+    let mut preview: Option<String> = None;
+    for i in 0..iterations {
+        match client.generate_asr(model, audio, "audio.wav").await {
+            Ok((transcript, wall_ms)) => {
+                let m = api::asr_metrics_from(transcript, wall_ms, audio, reference);
+                let wer_s = m.wer.map(|w| format!(", WER {:.3}", w)).unwrap_or_default();
+                println!(
+                    "    #{}: {:.0} ms, RTF {:.2}{}",
+                    i + 1,
+                    m.wall_clock_ms,
+                    m.real_time_factor,
+                    wer_s
+                );
+                if preview.is_none() {
+                    let t = &m.transcript;
+                    preview = Some(t.chars().take(120).collect());
+                }
+                latencies.push(m.wall_clock_ms);
+                rtfs.push(m.real_time_factor);
+                audio_secs.push(m.audio_seconds);
+                if let Some(w) = m.wer {
+                    wers.push(w);
+                }
+            }
+            Err(e) => {
+                println!("    #{}: ERR {e}", i + 1);
+                errors.push(e);
+            }
+        }
+    }
+    let coherence_pass = if latencies.is_empty() {
+        None
+    } else {
+        Some(true)
+    };
+    let mut stats = Vec::new();
+    if let Some(s) = Stats::compute("ASR latency", "ms", &latencies) {
+        stats.push(s);
+    }
+    if let Some(s) = Stats::compute("Real-time factor", "x", &rtfs) {
+        stats.push(s);
+    }
+    if let Some(s) = Stats::compute("Word error rate", "wer", &wers) {
+        stats.push(s);
+    }
+    if let Some(s) = Stats::compute("Audio seconds", "s", &audio_secs) {
+        stats.push(s);
+    }
+    let load_error = if latencies.is_empty() {
+        Some(
+            errors
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "no transcript produced".to_string()),
+        )
+    } else {
+        None
+    };
+    CellResult {
+        target,
+        model: model.to_string(),
+        model_fingerprint: None,
+        num_ctx,
+        prompt_name: prompt_name.to_string(),
+        prompt_chars,
+        iterations: Vec::new(),
+        gpu_samples_per_iter: Vec::new(),
+        host_samples_per_iter: Vec::new(),
+        energy_per_iter: Vec::new(),
+        carbon_intensity,
+        load_time_ms: None,
+        stats,
+        first_response_preview: preview,
+        coherence_pass,
+        load_error,
+        iteration_errors: errors,
+    }
+}
+
 fn unloadable_cells<'a>(
     target: &'a ServerTarget,
     model: &str,
