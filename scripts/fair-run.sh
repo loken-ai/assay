@@ -349,9 +349,24 @@ if [ "$BENCH_MODE" = gpu ] && [ -n "$GPU_PIN" ]; then
     fi
   done
 fi
-# LOKEN_ONLY=1 measures this engine alone. A variant arm already has its peers' rows from the
-# plain arm of the same cell, and measuring them again would only warm the room.
-if [ -z "${LOKEN_ONLY:-}" ]; then
+# -- WHICH ENGINES THIS CELL MEASURES -----------------------------------------
+# A cell names, positively, the engines that can serve its model in ENGINES (a subset of
+# "ollama loken vllm"). Each arm below runs only if its engine is named. An engine that is named
+# but fails to serve is recorded as that engine's error row; an engine that cannot serve this
+# model or this modality is simply not named - not a flag that turns one off. When ENGINES is
+# unset the default reproduces the historical behaviour, so existing callers are unchanged.
+if [ -z "${ENGINES:-}" ]; then
+  if [ -n "${LOKEN_ONLY:-}" ]; then
+    ENGINES="loken"
+  else
+    ENGINES="ollama loken"
+    [ "$BENCH_MODE" = gpu ] && [ -n "${VLLM_SERVE:-}" ] && ENGINES="$ENGINES vllm"
+  fi
+fi
+_want() { case " $ENGINES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+echo "▶ engines: $ENGINES"
+
+if _want ollama; then
 for _att in 1 2 3; do
   kill_all
   echo "▶ ollama (default params)${_att:+ [try $_att]} ..."
@@ -385,15 +400,17 @@ fi
 if [ -f "$TMP/ollama.json" ]; then PARTS+=("$TMP/ollama.json"); fi
 
 # -- 2. LOKEN, isolated -------------------------------------------------------
+if _want loken; then
 kill_all
 echo "▶ LOKEN${LOKEN_EXTRA:+ ${LOKEN_EXTRA[*]}} ..."
 engine_start loken || true
 cool_wait
 "$ASSAY" --loken http://127.0.0.1:$LOKEN_PORT "${NUMGPU[@]}" "${COMMON[@]}" "$@" -o "$TMP/loken.json" || true
 if [ -f "$TMP/loken.json" ]; then PARTS+=("$TMP/loken.json"); fi
+fi
 
 # -- 3. vLLM, isolated (GPU only, when requested) -----------------------------
-if [ "$BENCH_MODE" = gpu ] && [ -n "${VLLM_SERVE:-}" ] && [ -z "${LOKEN_ONLY:-}" ]; then
+if _want vllm && [ "$BENCH_MODE" = gpu ] && [ -n "${VLLM_SERVE:-}" ]; then
   kill_all
   echo "▶ vLLM: $VLLM_SERVE ..."
   # Which wrapper depends on where the weights come from; its own index flag stays because
